@@ -63,7 +63,7 @@ export default function (pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     executionMode: "sequential",
-    description: "Run general-purpose background agents in separate Durable conversations. "
+    description: "Run general-purpose background agents in separate conversations. "
       + "Use only in trusted workspaces where children may run native tools with your OS permissions. "
       + "Children share the parent's working directory. Their native read/bash/edit/write tools match the parent's active tool names and bypass parent permission hooks and custom tool overrides. "
       + "Spawn returns immediately and completion arrives as a notification. Children take the parent's model, thinking level, and system prompt at spawn. "

@@ -1,4 +1,4 @@
-# Durable subagents
+# pi-subagents
 
 A Pi extension for delegating research, review, and coding to agents that run
 in the background.
