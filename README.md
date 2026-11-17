@@ -11,15 +11,25 @@ in the background.
 
 ## Install and try
 
-With Pi 1.5.2 and Node.js 22.19 or newer, run these commands from this checkout.
+Install with Pi 1.5.2 and Node.js 22.19 or newer.
 
 ```sh
-npm ci
-pi install "$PWD"
+pi install git:github.com/lithammer/pi-subagents
 ```
 
 Start Pi and try this prompt.
 
 > Ask a background agent to explain how to build and test this repo. Keep it read-only.
 
-To uninstall, run `pi remove "$PWD"` from this checkout and restart Pi.
+To uninstall, run `pi remove git:github.com/lithammer/pi-subagents` and restart Pi.
+
+### Local development
+
+Run these commands from your checkout.
+
+```sh
+npm ci
+pi install "$PWD"
+```
+
+To uninstall the local copy, run `pi remove "$PWD"` from the same checkout and restart Pi.
