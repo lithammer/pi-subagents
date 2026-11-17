@@ -6,7 +6,9 @@
   "type": "module",
   "description": "Background subagents for Pi",
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "scripts": {
     "check": "tsc --noEmit"

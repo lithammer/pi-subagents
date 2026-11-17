@@ -78,20 +78,24 @@ export class Subagents {
     const registry = createRegistry();
     registry.install(CodingTools);
 
-    agents.harness = await Harness.open(new MemoryStorage(), {
-      models: agents.models,
-      registry,
-      env: ({ cwd }) => {
-        if (!cwd) throw new Error("Subagent has no working directory.");
+    agents.harness = await Harness.open(
+      new MemoryStorage(),
+      {
+        models: agents.models,
+        registry,
+        env: ({ cwd }) => {
+          if (!cwd) throw new Error("Subagent has no working directory.");
 
-        let environment = agents.environments.get(cwd);
-        if (!environment) {
-          environment = new NodeExecutionEnv({ cwd });
-          agents.environments.set(cwd, environment);
-        }
-        return environment;
+          let environment = agents.environments.get(cwd);
+          if (!environment) {
+            environment = new NodeExecutionEnv({ cwd });
+            agents.environments.set(cwd, environment);
+          }
+          return environment;
+        },
       },
-    }, context);
+      context,
+    );
 
     return agents;
   }
@@ -100,21 +104,33 @@ export class Subagents {
     this.assertOpen();
     this.addProvider(config.model.provider);
 
-    const conversation = await this.harness.createConversation({
-      ownership: { kind: "ownerless" },
-      agent: {
-        model: { provider: config.model.provider, modelId: config.model.id },
-        thinkingLevel: config.thinking,
-        extensions: [CodingTools],
-        tools: CodingTools.tools!.filter((tool) => config.tools.includes(tool.name)),
-        cwd: config.cwd,
-        instructions: `${config.systemPrompt}\n\nYou are a delegated general-purpose agent in a separate conversation. The parent instructions describe its environment; your only executable tools are ${config.tools.length ? config.tools.join(", ") : "none"}. You have no extensions, MCP tools, or nested agents. Follow the task's edit scope and report evidence to the parent.`,
+    const conversation = await this.harness.createConversation(
+      {
+        ownership: { kind: "ownerless" },
+        agent: {
+          model: { provider: config.model.provider, modelId: config.model.id },
+          thinkingLevel: config.thinking,
+          extensions: [CodingTools],
+          tools: CodingTools.tools!.filter((tool) =>
+            config.tools.includes(tool.name),
+          ),
+          cwd: config.cwd,
+          instructions: `${config.systemPrompt}\n\nYou are a delegated general-purpose agent in a separate conversation. The parent instructions describe its environment; your only executable tools are ${config.tools.length ? config.tools.join(", ") : "none"}. You have no extensions, MCP tools, or nested agents. Follow the task's edit scope and report evidence to the parent.`,
+        },
       },
-    }, context);
+      context,
+    );
     const watch = await conversation.watch(context);
     const id = `agent-${randomUUID().slice(0, 8)}`;
     const child: Child = {
-      snapshot: { id, label, model: `${config.model.provider}/${config.model.id}`, status: "idle", pending: 0, activity: "ready" },
+      snapshot: {
+        id,
+        label,
+        model: `${config.model.provider}/${config.model.id}`,
+        status: "idle",
+        pending: 0,
+        activity: "ready",
+      },
       conversation,
       watch,
       waits: new Set(),
@@ -127,7 +143,13 @@ export class Subagents {
 
       const live = call.value.docs["pi.live"] as LiveState | undefined;
       const tool = live?.tools?.find((slot) => slot.status === "running");
-      child.snapshot.activity = tool ? `using ${tool.name}` : live?.generation ? "thinking" : child.snapshot.pending ? "queued" : "ready";
+      child.snapshot.activity = tool
+        ? `using ${tool.name}`
+        : live?.generation
+          ? "thinking"
+          : child.snapshot.pending
+            ? "queued"
+            : "ready";
       this.changed();
     });
 
@@ -147,8 +169,16 @@ export class Subagents {
 
   async result(id: string, submission?: number) {
     const child = this.child(id);
-    const reply = submission === undefined ? [...child.replies.values()].at(-1) : child.replies.get(submission);
-    if (!reply) return { ...child.snapshot, output: "No matching completed reply. A notification arrives when the task settles." };
+    const reply =
+      submission === undefined
+        ? [...child.replies.values()].at(-1)
+        : child.replies.get(submission);
+    if (!reply)
+      return {
+        ...child.snapshot,
+        output:
+          "No matching completed reply. A notification arrives when the task settles.",
+      };
 
     const result = { ...reply };
     const truncated = truncateHead(result.output);
@@ -157,7 +187,12 @@ export class Subagents {
     const directory = await mkdtemp(join(tmpdir(), "pi-durable-subagent-"));
     const path = join(directory, `${id}.txt`);
     await writeFile(path, result.output, { mode: 0o600 });
-    return { ...result, output: truncated.content, truncated: true, fullOutputPath: path };
+    return {
+      ...result,
+      output: truncated.content,
+      truncated: true,
+      fullOutputPath: path,
+    };
   }
 
   async stop(id: string) {
@@ -171,17 +206,25 @@ export class Subagents {
   }
 
   close() {
-    return this.closing ??= this.closeAll();
+    return (this.closing ??= this.closeAll());
   }
 
   private async closeAll() {
     this.closed = true;
-    await Promise.all([...this.children.values()].map((child) => child.watch.stop()));
+    await Promise.all(
+      [...this.children.values()].map((child) => child.watch.stop()),
+    );
     try {
       await this.harness.close(context);
-      await Promise.all([...this.children.values()].flatMap((child) => [...child.waits]));
+      await Promise.all(
+        [...this.children.values()].flatMap((child) => [...child.waits]),
+      );
     } finally {
-      await Promise.all([...this.environments.values()].map((environment) => environment.cleanup(context)));
+      await Promise.all(
+        [...this.environments.values()].map((environment) =>
+          environment.cleanup(context),
+        ),
+      );
     }
   }
 
@@ -191,15 +234,25 @@ export class Subagents {
     this.models.setProvider({
       id: provider,
       name: provider,
-      getModels: () => this.parent.getAll().filter((model) => model.provider === provider),
-      auth: { apiKey: { name: "Parent Pi authentication", resolve: () => this.parent.getProviderAuth(provider) } },
+      getModels: () =>
+        this.parent.getAll().filter((model) => model.provider === provider),
+      auth: {
+        apiKey: {
+          name: "Parent Pi authentication",
+          resolve: () => this.parent.getProviderAuth(provider),
+        },
+      },
       stream: this.parent.stream.bind(this.parent),
       streamSimple: this.parent.streamSimple.bind(this.parent),
     });
     this.providers.add(provider);
   }
 
-  private async submit(child: Child, task: string, delivery: "followUp" | "steer") {
+  private async submit(
+    child: Child,
+    task: string,
+    delivery: "followUp" | "steer",
+  ) {
     this.assertOpen();
     child.snapshot.pending++;
     child.snapshot.status = "running";
@@ -208,7 +261,10 @@ export class Subagents {
 
     let submission: Submission;
     try {
-      submission = await child.conversation.submit({ type: "input", content: task, whenBusy: delivery }, context);
+      submission = await child.conversation.submit(
+        { type: "input", content: task, whenBusy: delivery },
+        context,
+      );
     } catch (error) {
       child.snapshot.pending--;
       child.snapshot.status = child.snapshot.pending ? "running" : "failed";
@@ -218,10 +274,13 @@ export class Subagents {
 
     const wait = this.settle(child, submission);
     child.waits.add(wait);
-    void wait.then(() => child.waits.delete(wait), (error) => {
-      child.waits.delete(wait);
-      console.error("Durable subagent completion delivery failed:", error);
-    });
+    void wait.then(
+      () => child.waits.delete(wait),
+      (error) => {
+        child.waits.delete(wait);
+        console.error("Durable subagent completion delivery failed:", error);
+      },
+    );
   }
 
   private async settle(child: Child, submission: Submission) {
@@ -230,26 +289,57 @@ export class Subagents {
     try {
       const settled = await submission.wait(context);
       if (settled.status === "done" && settled.type === "input") {
-        const entry = await child.conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
-        const output = entry?.model?.flatMap((message) => message.role === "assistant"
-          ? message.content.flatMap((part) => part.type === "text" ? [part.text] : []) : []).join("\n") ?? "";
-        completion = { id: child.snapshot.id, label: child.snapshot.label, submission: submission.id, status: "completed", output };
+        const entry = await child.conversation.commit(
+          (tx) => tx.entry(AssistantEntry, settled.answer),
+          context,
+        );
+        const output =
+          entry?.model
+            ?.flatMap((message) =>
+              message.role === "assistant"
+                ? message.content.flatMap((part) =>
+                    part.type === "text" ? [part.text] : [],
+                  )
+                : [],
+            )
+            .join("\n") ?? "";
+        completion = {
+          id: child.snapshot.id,
+          label: child.snapshot.label,
+          submission: submission.id,
+          status: "completed",
+          output,
+        };
         newReply = child.answer !== settled.answer;
         child.answer = settled.answer;
       } else {
         const stopped = settled.reason === "aborted";
         completion = {
-          id: child.snapshot.id, label: child.snapshot.label, submission: submission.id,
+          id: child.snapshot.id,
+          label: child.snapshot.label,
+          submission: submission.id,
           status: stopped ? "stopped" : "failed",
-          output: settled.detail ? `${settled.reason}: ${JSON.stringify(settled.detail)}` : settled.reason ?? settled.status,
+          output: settled.detail
+            ? `${settled.reason}: ${JSON.stringify(settled.detail)}`
+            : (settled.reason ?? settled.status),
         };
       }
     } catch (error) {
-      completion = { id: child.snapshot.id, label: child.snapshot.label, submission: submission.id, status: "failed", output: String(error) };
+      completion = {
+        id: child.snapshot.id,
+        label: child.snapshot.label,
+        submission: submission.id,
+        status: "failed",
+        output: String(error),
+      };
     }
 
     child.snapshot.pending--;
-    child.snapshot.status = child.snapshot.pending ? "running" : completion.status === "completed" ? "idle" : completion.status;
+    child.snapshot.status = child.snapshot.pending
+      ? "running"
+      : completion.status === "completed"
+        ? "idle"
+        : completion.status;
     child.replies.set(submission.id, completion);
     this.changed();
     if (!this.closed && newReply) this.onComplete(completion);
