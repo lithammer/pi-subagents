@@ -69,6 +69,7 @@ export default function (pi: ExtensionAPI) {
       "Use subagent for independent research, review, or implementation when delegation saves time or context; work locally while it runs.",
       "Give subagent a self-contained task, file scope, expected evidence, and explicit permission to edit or research only. The child does not inherit the conversation history.",
       "Do not poll subagent status/result for completion; a notification arrives automatically. Use send for related follow-up work and stop to cancel a child explicitly.",
+      "When waiting for a subagent and no independent work remains, end your turn with a brief status message and no tool calls. Never use sleep, shell waits, or repeated tool calls to keep your turn open: completion notifications wait for the parent run to finish, then start another turn automatically.",
     ],
     parameters: Type.Object({
       action: StringEnum(["spawn", "send", "result", "status", "stop"] as const),

@@ -6,11 +6,11 @@ agent type.
 
 ## 1. End the parent turn when waiting
 
-- [ ] Tell the parent to end its turn when no useful work remains. Never run
+- [x] Tell the parent to end its turn when no useful work remains. Never run
   `sleep` or poll to wait for a child.
-- [ ] Verify that a completion wakes an idle parent and reaches a busy parent
+- [x] Verify that a completion wakes an idle parent and reaches a busy parent
   after its run ends, without being lost or delivered twice.
-- [ ] Repeat the live two-snapshot exercise without shell sleeps in the parent.
+- [x] Repeat the live two-snapshot exercise without shell sleeps in the parent.
 
 ## 2. Fit the normal Pi setup
 
