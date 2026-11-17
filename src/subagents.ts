@@ -1,5 +1,10 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  Model,
+  ModelThinkingLevel,
+  Usage,
+} from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { truncateHead } from "@earendil-works/pi-coding-agent";
@@ -7,11 +12,13 @@ import {
   AssistantEntry,
   Harness,
   MemoryStorage,
+  UsageDoc,
   createRegistry,
   type Conversation,
   type ConversationWatch,
   type LiveState,
   type Submission,
+  type UsageState,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -35,6 +42,14 @@ export type Completion = {
   submission: number;
   status: "completed" | "stopped" | "failed";
   output: string;
+  usage?: UsageSummary;
+};
+
+type UsageSummary = Pick<
+  Usage,
+  "input" | "output" | "cacheRead" | "cacheWrite"
+> & {
+  cost: number;
 };
 
 type SpawnConfig = {
@@ -51,6 +66,7 @@ type Child = {
   watch: ConversationWatch;
   waits: Set<Promise<void>>;
   replies: Map<number, Completion>;
+  accountedUsage: UsageState["models"];
   answer?: number;
 };
 
@@ -61,6 +77,7 @@ export class Subagents {
   private readonly providers = new Set<string>();
   private closed = false;
   private closing?: Promise<void>;
+  private pendingUsage?: Usage;
   private harness!: Harness;
 
   private constructor(
@@ -135,6 +152,7 @@ export class Subagents {
       watch,
       waits: new Set(),
       replies: new Map(),
+      accountedUsage: {},
     };
     this.children.set(id, child);
 
@@ -165,6 +183,13 @@ export class Subagents {
 
   list() {
     return [...this.children.values()].map((child) => ({ ...child.snapshot }));
+  }
+
+  takePendingUsage() {
+    if (this.closed) return undefined;
+    const usage = this.pendingUsage;
+    this.pendingUsage = undefined;
+    return usage;
   }
 
   async result(id: string, submission?: number) {
@@ -340,9 +365,52 @@ export class Subagents {
       : completion.status === "completed"
         ? "idle"
         : completion.status;
+    if (!this.closed) {
+      try {
+        const ledger = await this.harness.snapshot(
+          UsageDoc,
+          child.conversation.id,
+          context,
+        );
+        if (ledger)
+          completion.usage = this.accountForUsage(child, ledger.models);
+      } catch (error) {
+        if (!this.closed)
+          console.error("Could not read subagent usage:", error);
+      }
+    }
     child.replies.set(submission.id, completion);
     this.changed();
     if (!this.closed && newReply) this.onComplete(completion);
+  }
+
+  private accountForUsage(
+    child: Child,
+    models: UsageState["models"],
+  ): UsageSummary {
+    const summary: UsageSummary = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+    };
+    for (const [key, usage] of Object.entries(models)) {
+      summary.input += usage.input;
+      summary.output += usage.output;
+      summary.cacheRead += usage.cacheRead;
+      summary.cacheWrite += usage.cacheWrite;
+      summary.cost += usage.cost.total;
+      const previous = child.accountedUsage[key];
+      const delta = previous ? combineUsage(usage, previous, -1) : usage;
+      if (delta.totalTokens === 0 && delta.cost.total === 0) continue;
+
+      this.pendingUsage = this.pendingUsage
+        ? combineUsage(this.pendingUsage, delta, 1)
+        : delta;
+      child.accountedUsage[key] = usage;
+    }
+    return summary;
   }
 
   private child(id: string) {
@@ -359,4 +427,30 @@ export class Subagents {
   private changed() {
     if (!this.closed) this.onChange(this.list());
   }
+}
+
+function combineUsage(first: Usage, second: Usage, sign: 1 | -1): Usage {
+  return {
+    input: first.input + sign * second.input,
+    output: first.output + sign * second.output,
+    cacheRead: first.cacheRead + sign * second.cacheRead,
+    cacheWrite: first.cacheWrite + sign * second.cacheWrite,
+    ...(first.cacheWrite1h !== undefined || second.cacheWrite1h !== undefined
+      ? {
+          cacheWrite1h:
+            (first.cacheWrite1h ?? 0) + sign * (second.cacheWrite1h ?? 0),
+        }
+      : {}),
+    ...(first.reasoning !== undefined || second.reasoning !== undefined
+      ? { reasoning: (first.reasoning ?? 0) + sign * (second.reasoning ?? 0) }
+      : {}),
+    totalTokens: first.totalTokens + sign * second.totalTokens,
+    cost: {
+      input: first.cost.input + sign * second.cost.input,
+      output: first.cost.output + sign * second.cost.output,
+      cacheRead: first.cost.cacheRead + sign * second.cost.cacheRead,
+      cacheWrite: first.cost.cacheWrite + sign * second.cost.cacheWrite,
+      total: first.cost.total + sign * second.cost.total,
+    },
+  };
 }

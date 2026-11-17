@@ -12,6 +12,11 @@ import { Subagents, type AgentSnapshot, type Completion } from "./subagents.ts";
 
 const messageType = "durable-subagent-completion";
 
+function formatUsage(usage: Completion["usage"]) {
+  if (!usage) return "";
+  return `\nTokens: ${usage.input} input, ${usage.output} output, ${usage.cacheRead} cache read, ${usage.cacheWrite} cache write · $${usage.cost.toFixed(6)}`;
+}
+
 export default function (pi: ExtensionAPI) {
   let runtime: Promise<Subagents> | undefined;
   let active = false;
@@ -45,7 +50,7 @@ export default function (pi: ExtensionAPI) {
       {
         customType: messageType,
         content:
-          `Subagent ${completion.id} (${completion.label}): ${completion.status}\n${preview.content}` +
+          `Subagent ${completion.id} (${completion.label}): ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
           (preview.truncated
             ? `\nUse subagent result with id ${completion.id} and submission ${completion.submission} for this full reply.`
             : ""),
@@ -85,7 +90,11 @@ export default function (pi: ExtensionAPI) {
         (preview.truncated
           ? `\nUse subagent result: ${completion.id}, submission ${completion.submission}`
           : "");
-      return new Text(`${title}\n${body}`, outputPad, 0);
+      return new Text(
+        `${title}${formatUsage(completion.usage)}\n${body}`,
+        outputPad,
+        0,
+      );
     },
   );
 
@@ -148,7 +157,7 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
     }),
-    async execute(_toolCallId, args, signal, _onUpdate, ctx) {
+    async execute(toolCallId, args, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       if (!active) throw new Error("The parent session has closed.");
 
@@ -222,7 +231,13 @@ export default function (pi: ExtensionAPI) {
         output += `\n[Truncated. Full JSON result: ${path}]`;
       }
 
-      return { content: [{ type: "text", text: output }], details: result };
+      const usage =
+        toolCallId && !signal?.aborted ? agents.takePendingUsage() : undefined;
+      return {
+        content: [{ type: "text", text: output }],
+        details: result,
+        ...(usage && { usage }),
+      };
     },
     renderCall(args, theme) {
       return new Text(
