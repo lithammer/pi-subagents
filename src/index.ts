@@ -63,7 +63,13 @@ export default function (pi: ExtensionAPI) {
     name: "subagent",
     label: "Subagent",
     executionMode: "sequential",
-    description: "Run general-purpose background agents in separate Durable conversations. Children share the parent's working directory with no file isolation. Spawn returns immediately; completion arrives as a notification. Reuse an id with send to retain context. Children inherit the parent's model, thinking level, and system prompt at spawn, but have only the parent's active read/bash/edit/write tools, implemented by Durable; no extensions, MCP, or nested delegation. Result returns a reply by submission id, or the latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). Status lists agents. Stop cancels outstanding work; the conversation remains available for another send. Children live only for this Pi session.",
+    description: "Run general-purpose background agents in separate Durable conversations. "
+      + "Use only in trusted workspaces where children may run native tools with your OS permissions. "
+      + "Children share the parent's working directory. Their native read/bash/edit/write tools match the parent's active tool names and bypass parent permission hooks and custom tool overrides. "
+      + "Spawn returns immediately and completion arrives as a notification. Children take the parent's model, thinking level, and system prompt at spawn. "
+      + "Reuse an id with send to retain that selection and conversation. Children have no parent extensions, MCP, or nested delegation. "
+      + "Result returns a reply by submission id, or the latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). "
+      + "Status lists agents. Stop cancels outstanding work and keeps the conversation for another send. Children live only for this Pi session.",
     promptSnippet: "Delegate independent tasks to background agents; message existing agents to retain context",
     promptGuidelines: [
       "Use subagent for independent research, review, or implementation when delegation saves time or context; work on non-overlapping tasks locally while it runs. Do not duplicate a subagent's work.",
@@ -152,8 +158,8 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("durable-agents", {
-    description: "List Durable prototype agents, or stop one: /durable-agents stop <id>",
+  pi.registerCommand("agents", {
+    description: "List background agents or stop one with /agents stop <id>",
     handler: async (args, ctx) => {
       const agents = runtime ? await runtime : undefined;
       const [action, id] = args.trim().split(/\s+/);

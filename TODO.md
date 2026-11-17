@@ -1,8 +1,7 @@
 # From prototype to daily use
 
-Replace pi-subagents for background research, review, and implementation without
-recreating its full feature set. Keep model inheritance and one general-purpose
-agent type.
+Support background research, review, and implementation in Pi. Keep model
+inheritance and one general-purpose agent type.
 
 ## 1. End the parent turn when waiting
 
@@ -14,16 +13,15 @@ agent type.
 
 ## 2. Fit the normal Pi setup
 
-- [ ] Load this package in place of pi-subagents without disabling every other
-  extension, as the prototype launcher does.
-- [ ] Check coexistence with the normal parent tools, extensions, and MCP setup.
-  Children need not inherit those extensions or MCP connections.
-- [ ] Verify that new children use the parent's current model and thinking level,
+- [x] Load this package through Pi's normal package settings alongside other
+  extensions. See the setup in [README.md](README.md).
+- [x] Check coexistence with the normal parent tools, extensions, and MCP setup.
+  Pi 1.5.2 ran built-in `read`, the installed `todo` extension, and a local MCP
+  tool in the same session. The Slack MCP connection failed in the sandbox.
+- [x] Verify that new children use the parent's current model and thinking level,
   while an existing child retains its original selection and conversation.
-- [ ] Define the supported trust model. Durable's native tools bypass parent
-  permission hooks and custom tool overrides; matching tool names does not
-  preserve those policies. Decide whether to bridge those policies or explicitly
-  limit support to trusted workspaces without them.
+- [x] Limit support to trusted workspaces where children can run native tools
+  directly. Durable's tools bypass parent permission hooks and custom overrides.
 
 ## 3. Show failures and spend
 
