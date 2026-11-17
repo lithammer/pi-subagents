@@ -1,6 +1,7 @@
 {
   "name": "pi-durable-subagents-prototype",
   "version": "0.0.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "Throwaway Pi extension exploring Durable-backed background subagents",
