@@ -3,6 +3,7 @@ import {
   type AssistantMessage,
   type ToolCall,
   type TranscriptContext,
+  type Usage,
 } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
@@ -20,9 +21,12 @@ import { fileURLToPath } from "node:url";
 
 const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
+export type ScriptedReply =
+  string | ToolCall[] | { text: string; usage: Usage } | { error: string };
+
 export async function openScriptedSession(
   t: TestContext,
-  reply: (context: TranscriptContext) => Promise<string | ToolCall[]>,
+  reply: (context: TranscriptContext) => Promise<ScriptedReply>,
   prepareWorkspace?: (cwd: string) => Promise<void>,
   unblockModelReplies = () => {},
 ): Promise<AgentSession> {
@@ -82,16 +86,22 @@ export async function openScriptedSession(
       stream.push({ type: "start", partial: message });
       void reply(context).then(
         (answer) => {
-          message.content =
-            typeof answer === "string"
-              ? [{ type: "text", text: answer }]
-              : answer;
-          message.stopReason = typeof answer === "string" ? "stop" : "toolUse";
-          stream.push({
-            type: "done",
-            reason: message.stopReason,
-            message,
-          });
+          if (Array.isArray(answer)) {
+            message.content = answer;
+          } else if (typeof answer === "string") {
+            message.content = [{ type: "text", text: answer }];
+          } else if ("error" in answer) {
+            message.stopReason = "error";
+            message.errorMessage = answer.error;
+            stream.push({ type: "error", reason: "error", error: message });
+            return;
+          } else {
+            message.content = [{ type: "text", text: answer.text }];
+            message.usage = answer.usage;
+          }
+          const reason = Array.isArray(answer) ? "toolUse" : "stop";
+          message.stopReason = reason;
+          stream.push({ type: "done", reason, message });
         },
         (error) => {
           providerErrors.push(error);

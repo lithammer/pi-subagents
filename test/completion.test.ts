@@ -11,8 +11,8 @@ import type {
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { test } from "node:test";
-import { openScriptedSession } from "./scripted-pi.ts";
+import { test, type TestContext } from "node:test";
+import { openScriptedSession, type ScriptedReply } from "./scripted-pi.ts";
 
 const childTask = "Start the child task.";
 const steers = ["Include the first detail.", "Include the second detail."];
@@ -250,118 +250,223 @@ for (const [name, deliveryScenario] of [
 }
 
 test(
-  "the same child notifies twice for identical replies to separate tasks",
+  "separate replies notify the parent, remain retrievable, and count once",
   { timeout: 15_000 },
   async (t) => {
-    const firstTask = "Answer the first task.";
-    const nextTask = "Answer the follow-up.";
-    const spawn = "Start the child.";
-    const followUp = "Send the child a follow-up.";
-    const answer = "Same reply.";
-    let childId = "";
-    let parentCallsWithNotice = 0;
-    const session = await openScriptedSession(t, async ({ messages }) => {
-      const inputs = messages
-        .filter((message) => message.role === "user")
-        .map(({ content }) => contentText(content));
-      if (inputs[0] === firstTask) {
-        assert.deepEqual(
-          inputs,
-          inputs.length === 1 ? [firstTask] : [firstTask, nextTask],
-          "The child must receive the follow-up as a separate task",
-        );
-        return answer;
-      }
-      const prompt = inputs.at(-1);
-      if (prompt?.includes(answer)) {
-        parentCallsWithNotice++;
-        return "Received the completion.";
-      }
+    const tasks = [
+      "Answer the first task.",
+      "Answer again.",
+      "Give a new answer.",
+      "Answer the final task.",
+    ];
+    const answers = [
+      "Same reply.",
+      "Same reply.",
+      "Earlier reply.",
+      "Newest reply.",
+    ];
+    const usage = {
+      input: 7,
+      output: 3,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 10,
+      cost: {
+        input: 0.125,
+        output: 0.125,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0.25,
+      },
+    };
 
-      const results = messages.filter(
-        (message) => message.role === "toolResult",
-      );
-      if (prompt === spawn) {
-        const spawned = results.find(
-          ({ toolCallId }) => toolCallId === "spawn",
-        );
-        if (!spawned) {
-          return [
-            toolCall("spawn", "subagent", { action: "spawn", task: firstTask }),
-          ];
-        }
-        assert.equal(spawned.isError, false);
-        childId = JSON.parse(contentText(spawned.content)).id;
-        assert.equal(typeof childId, "string");
-        return "Started the child.";
-      }
-      assert.equal(prompt, followUp);
-      const sent = results.find(({ toolCallId }) => toolCallId === "send");
-      if (!sent) {
-        return [
-          toolCall("send", "subagent", {
-            action: "send",
-            id: childId,
-            task: nextTask,
-          }),
-        ];
-      }
-      assert.equal(sent.isError, false);
-      return "Sent the follow-up.";
-    });
-
-    await session.prompt(spawn);
-    await t.waitFor(
-      () =>
+    const { session, runTool, parentNotices } = await openSubagentSession(
+      t,
+      tasks[0],
+      (inputs) => {
+        const index = inputs.length - 1;
         assert.ok(
-          completionNotices(session).length >= 1,
-          "The first reply must notify the parent",
-        ),
-      deliveryWait,
+          index < tasks.length,
+          "The child must receive each task once",
+        );
+        assert.deepEqual(inputs, tasks.slice(0, index + 1));
+        return { text: answers[index], usage };
+      },
     );
-    await session.waitForIdle();
-    assert.equal(completionNotices(session).length, 1);
-    assert.equal(parentCallsWithNotice, 1);
 
-    await session.prompt(followUp);
-    await t.waitFor(
-      () =>
-        assert.ok(
-          completionNotices(session).length >= 2,
-          "An identical follow-up reply must notify the parent again",
-        ),
-      deliveryWait,
-    );
-    await session.waitForIdle();
-    await session.prompt(`/agents stop ${childId}`);
-    await session.waitForIdle();
-    const delivered = completionNotices(session);
-    assert.equal(delivered.length, 2);
-    const submissions = new Set<number>();
-    for (const notice of delivered) {
+    const { id } = await runTool("spawn", { action: "spawn", task: tasks[0] });
+    assert.equal(typeof id, "string");
+    const submissions: number[] = [];
+    for (const [index, answer] of answers.entries()) {
+      if (index > 0) {
+        await runTool(`send-${index}`, {
+          action: "send",
+          id,
+          task: tasks[index],
+        });
+      }
+      const notice = await waitForCompletion(t, session, index + 1);
       const text = contentText(notice.content);
-      assert.ok(text.startsWith(`Subagent ${childId} `));
       assert.ok(text.endsWith(answer));
+      assert.equal(parentNotices.length, index + 1);
+      assert.equal(parentNotices[index], text);
       const details = notice.details;
       assert.ok(
-        details && typeof details === "object" && "submission" in details,
-        "Each notice must identify its submission",
+        details &&
+          typeof details === "object" &&
+          "id" in details &&
+          "submission" in details,
+        "The notice must identify its child and submission",
       );
+      assert.equal(details.id, id);
       const { submission } = details;
       assert.ok(
         typeof submission === "number" && Number.isSafeInteger(submission),
-        "Each notice must carry a valid submission ID",
       );
-      submissions.add(submission);
+      submissions.push(submission);
+      checkUsage(index);
     }
-    assert.equal(
-      submissions.size,
-      2,
-      "Each notice must identify a different submission",
+
+    const submission = submissions.at(-2);
+    assert.ok(
+      submission !== undefined,
+      "The earlier submission must be recorded",
     );
-    assert.equal(parentCallsWithNotice, 2);
+    const result = await runTool("exact-result", {
+      action: "result",
+      id,
+      submission,
+    });
+    assert.equal(result.id, id);
+    assert.equal(result.status, "completed");
+    assert.equal(
+      result.submission,
+      submission,
+      "Result must identify the requested submission",
+    );
+    assert.equal(
+      result.output,
+      answers.at(-2),
+      "Result must contain the requested reply",
+    );
+    checkUsage(answers.length);
+
+    const latest = await runTool("latest-result", { action: "result", id });
+    assert.equal(
+      latest.output,
+      answers.at(-1),
+      "Omitted submission must return the latest reply",
+    );
+    assert.equal(latest.submission, submissions.at(-1));
+    checkUsage(answers.length);
+
+    await session.prompt(`/agents stop ${id}`);
+    await session.waitForIdle();
+    assert.equal(completionNotices(session).length, answers.length);
+    assert.equal(parentNotices.length, answers.length);
+    assert.equal(
+      new Set(submissions).size,
+      answers.length,
+      "Each notice must identify a separate submission",
+    );
+
+    function checkUsage(chargedTurns: number) {
+      const { tokens, cost } = session.getSessionStats();
+      assert.equal(
+        tokens.total,
+        chargedTurns * usage.totalTokens,
+        "Pi must charge each child turn once",
+      );
+      assert.equal(
+        cost,
+        chargedTurns * usage.cost.total,
+        "Pi must charge each child turn's cost once",
+      );
+    }
   },
 );
+
+test(
+  "child transcript keeps provider credentials out of the parent session",
+  { timeout: 15_000 },
+  async (t) => {
+    const task = "Make a request the provider will reject.";
+    const credential = "synthetic-provider-credential";
+    const { session, runTool } = await openSubagentSession(t, task, () => ({
+      error: `HTTP 401 request rejected with ${credential}`,
+    }));
+
+    const { id } = await runTool("spawn", { action: "spawn", task });
+    await waitForCompletion(t, session, 1);
+    const transcript = await runTool("transcript", {
+      action: "transcript",
+      id,
+    });
+
+    assert.ok(
+      !JSON.stringify(session.sessionManager.getEntries()).includes(credential),
+      "Parent session entries must omit the provider credential",
+    );
+    assert.match(transcript.output, /model request failed \(HTTP 401\)/);
+  },
+);
+
+async function openSubagentSession(
+  t: TestContext,
+  childTask: string,
+  reply: (inputs: string[]) => ScriptedReply,
+) {
+  let request: ToolCall | undefined;
+  const parentNotices: string[] = [];
+  const session = await openScriptedSession(t, async ({ messages }) => {
+    const inputs = messages
+      .filter((message) => message.role === "user")
+      .map(({ content }) => contentText(content));
+    if (inputs[0] === childTask) return reply(inputs);
+
+    const prompt = inputs.at(-1);
+    if (!request || prompt !== request.id) {
+      assert.ok(prompt, "The parent must receive a completion or tool prompt");
+      parentNotices.push(prompt);
+      return "Received the completion.";
+    }
+
+    const callId = request.id;
+    const answered = messages.some(
+      (message) =>
+        message.role === "toolResult" && message.toolCallId === callId,
+    );
+    return answered ? "Received the tool result." : [request];
+  });
+
+  async function runTool(callId: string, args: ToolCall["arguments"]) {
+    request = toolCall(callId, "subagent", args);
+    await session.prompt(callId);
+    const result = session.messages.find(
+      (message): message is ToolResultMessage =>
+        message.role === "toolResult" && message.toolCallId === callId,
+    );
+    assert.ok(result, `The parent must receive the ${callId} result`);
+    assert.equal(result.isError, false);
+    return JSON.parse(contentText(result.content));
+  }
+
+  return { session, runTool, parentNotices };
+}
+
+async function waitForCompletion(
+  t: TestContext,
+  session: AgentSession,
+  count: number,
+) {
+  const notice = await t.waitFor(() => {
+    const entry = completionNotices(session)[count - 1];
+    assert.ok(entry, `Reply ${count} must notify the parent`);
+    return entry;
+  }, deliveryWait);
+  await session.waitForIdle();
+  return notice;
+}
 
 function completionNotices(session: AgentSession) {
   return customMessages(session, "durable-subagent-completion");
