@@ -63,7 +63,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     active = false;
-    if (runtime) await (await runtime).close();
+    try {
+      if (runtime) await (await runtime).close();
+    } finally {
+      runtime = undefined;
+    }
   });
 
   pi.on("session_tree", async () => {
@@ -109,6 +113,7 @@ export default function (pi: ExtensionAPI) {
       "Spawn returns immediately and completion arrives as a notification. Children take the parent's model, thinking level, and system prompt at spawn. " +
       "Reuse an id with send to retain that selection and conversation. Children have no parent extensions, MCP, or nested delegation. " +
       "Result returns a reply by submission id, or the latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). " +
+      "Transcript shows a child's current activity and recent model and tool failures, with no raw diagnostic text. " +
       "Status lists agents. Stop cancels outstanding work and keeps the conversation for another send. Children live only for this Pi session.",
     promptSnippet:
       "Delegate independent tasks to background agents; message existing agents to retain context",
@@ -116,7 +121,7 @@ export default function (pi: ExtensionAPI) {
       "Use subagent for independent research, review, or implementation when delegation saves time or context; work on non-overlapping tasks locally while it runs. Do not duplicate a subagent's work.",
       "Give subagent a self-contained task, file scope, expected evidence, and explicit permission to edit or research only. The child does not inherit the conversation history. For edits, assign non-overlapping write scopes to yourself and each subagent.",
       "Verify subagent results before reporting success: check the evidence, inspect any edits, and run relevant checks rather than relying on the summary alone.",
-      "Do not poll subagent status/result for completion; a notification arrives automatically. Use send for related follow-up work and stop to cancel a child explicitly.",
+      "Use transcript to diagnose a stuck or failed child. Completion notifications arrive automatically, so do not poll for them. Use send for related follow-up work and stop to cancel a child explicitly.",
       "When waiting for a subagent and no independent work remains, end your turn with a brief status message and no tool calls. Never use sleep, shell waits, or repeated tool calls to keep your turn open: completion notifications wait for the parent run to finish, then start another turn automatically.",
     ],
     parameters: Type.Object({
@@ -124,12 +129,14 @@ export default function (pi: ExtensionAPI) {
         "spawn",
         "send",
         "result",
+        "transcript",
         "status",
         "stop",
       ] as const),
       id: Type.Optional(
         Type.String({
-          description: "Existing agent id; required for send, result, and stop",
+          description:
+            "Existing agent id; required for send, result, transcript, and stop",
         }),
       ),
       task: Type.Optional(
@@ -216,6 +223,12 @@ export default function (pi: ExtensionAPI) {
           if (!args.id) throw new Error("result requires id.");
           result = await agents.result(args.id, args.submission);
           break;
+        case "transcript":
+          if (!args.id) throw new Error("transcript requires id.");
+          result = await agents.transcript(args.id);
+          if (!result)
+            throw new Error("No subagent with that ID in this session.");
+          break;
         case "status":
           result = agents.list();
           break;
@@ -278,10 +291,24 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("agents", {
-    description: "List background agents or stop one with /agents stop <id>",
+    description:
+      "List, stop, or inspect a background agent's failure transcript",
     handler: async (args, ctx) => {
       const agents = runtime ? await runtime : undefined;
       const [action, id] = args.trim().split(/\s+/);
+      if (action === "transcript") {
+        if (!ctx.hasUI) return;
+        if (!id) {
+          ctx.ui.notify("Usage: /agents transcript <id>", "warning");
+          return;
+        }
+        const transcript = await agents?.transcript(id);
+        ctx.ui.notify(
+          transcript?.output ?? "No subagent with that ID in this session.",
+          transcript ? "info" : "warning",
+        );
+        return;
+      }
       if (action === "stop" && id && agents) await agents.stop(id);
 
       const rows = agents?.list() ?? [];

@@ -1,9 +1,14 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type {
   Api,
+  AssistantMessage,
   Model,
   ModelThinkingLevel,
   Usage,
+} from "@earendil-works/pi-ai";
+import {
+  isContextOverflow,
+  isRetryableAssistantError,
 } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -12,10 +17,13 @@ import {
   AssistantEntry,
   Harness,
   MemoryStorage,
+  ToolResultEntry,
   UsageDoc,
   createRegistry,
   type Conversation,
   type ConversationWatch,
+  type Cursor,
+  type EntryRecord,
   type LiveState,
   type Submission,
   type UsageState,
@@ -162,12 +170,14 @@ export class Subagents {
       const live = call.value.docs["pi.live"] as LiveState | undefined;
       const tool = live?.tools?.find((slot) => slot.status === "running");
       child.snapshot.activity = tool
-        ? `using ${tool.name}`
-        : live?.generation
-          ? "thinking"
-          : child.snapshot.pending
-            ? "queued"
-            : "ready";
+        ? `using ${toolName(tool.name)}`
+        : live?.generation?.retry
+          ? "waiting to retry the model request"
+          : live?.generation
+            ? "thinking"
+            : child.snapshot.pending
+              ? "queued"
+              : "ready";
       this.changed();
     });
 
@@ -183,6 +193,38 @@ export class Subagents {
 
   list() {
     return [...this.children.values()].map((child) => ({ ...child.snapshot }));
+  }
+
+  async transcript(id: string) {
+    const child = this.children.get(id);
+    if (this.closed || !child) return undefined;
+
+    const limit = 20;
+    const failures: string[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await child.conversation.entries({}, 100, cursor, context);
+      if (this.closed) return undefined;
+      for (const entry of page.items) {
+        const failure = describeFailure(entry);
+        if (failure) failures.push(`#${entry.id} · ${failure}`);
+        if (failures.length === limit) break;
+      }
+      cursor = page.next;
+    } while (cursor && failures.length < limit);
+
+    const { model, status, pending, activity } = child.snapshot;
+    return {
+      id,
+      status,
+      output: [
+        `${id} · ${model} · ${status}`,
+        ...(pending ? [`${activity} · ${pending} pending`] : []),
+        ...(failures.length
+          ? failures
+          : ["No model or tool failures recorded."]),
+      ].join("\n"),
+    };
   }
 
   takePendingUsage() {
@@ -344,18 +386,17 @@ export class Subagents {
           label: child.snapshot.label,
           submission: submission.id,
           status: stopped ? "stopped" : "failed",
-          output: settled.detail
-            ? `${settled.reason}: ${JSON.stringify(settled.detail)}`
-            : (settled.reason ?? settled.status),
+          // Pi saves completion notices and tool results in the parent session.
+          output: settled.reason ?? settled.status,
         };
       }
-    } catch (error) {
+    } catch {
       completion = {
         id: child.snapshot.id,
         label: child.snapshot.label,
         submission: submission.id,
         status: "failed",
-        output: String(error),
+        output: "Could not read the child submission.",
       };
     }
 
@@ -427,6 +468,60 @@ export class Subagents {
   private changed() {
     if (!this.closed) this.onChange(this.list());
   }
+}
+
+function describeFailure(entry: EntryRecord) {
+  const message = entry.model?.[0];
+  if (message?.role === "assistant" && message.stopReason === "error")
+    return `model request failed (${modelErrorKind(message)})`;
+
+  if (
+    !ToolResultEntry.is(entry) ||
+    message?.role !== "toolResult" ||
+    !message.isError
+  )
+    return undefined;
+
+  // Tool names and diagnostics may include model or tool output. Show only known values.
+  const tool = toolName(message.toolName);
+  const diagnostic = entry.data.diagnostics.find(
+    ({ severity }) => severity === "error",
+  );
+  const code = diagnostic?.code;
+  if (tool === "bash" && diagnostic?.code === "exit_code") {
+    const exit = /^Command exited with code (\d{1,3})$/.exec(
+      diagnostic.message,
+    );
+    if (exit) return `bash failed (exit code ${exit[1]})`;
+  }
+  switch (code) {
+    case "invalid_arguments":
+    case "tool_unavailable":
+    case "tool_error":
+    case "unsupported_image":
+      return `${tool} failed (${code})`;
+    default:
+      return `${tool} failed`;
+  }
+}
+
+function toolName(name: string) {
+  return (
+    CodingTools.tools!.find((tool) => tool.name === name)?.name ??
+    "unknown tool"
+  );
+}
+
+function modelErrorKind(message: AssistantMessage) {
+  if (isContextOverflow(message)) return "context overflow";
+  const error = message.errorMessage ?? "";
+  const status =
+    /^(?:HTTP )?([45]\d\d)\b/.exec(error) ??
+    /^.* error \(([45]\d\d)\):/.exec(error);
+  if (status) return `HTTP ${status[1]}`;
+  return isRetryableAssistantError(message)
+    ? "retryable error"
+    : "provider error";
 }
 
 function combineUsage(first: Usage, second: Usage, sign: 1 | -1): Usage {
