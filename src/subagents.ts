@@ -17,6 +17,7 @@ import {
   AssistantEntry,
   Harness,
   MemoryStorage,
+  SessionFailed,
   ToolResultEntry,
   UsageDoc,
   createRegistry,
@@ -25,6 +26,7 @@ import {
   type Cursor,
   type EntryRecord,
   type LiveState,
+  type Report,
   type Submission,
   type UsageState,
 } from "@earendil-works/pi-durable";
@@ -92,14 +94,16 @@ export class Subagents {
     private readonly parent: ModelRegistry,
     private readonly onChange: (agents: AgentSnapshot[]) => void,
     private readonly onComplete: (completion: Completion) => void,
+    private readonly onFailure: (message: string) => void,
   ) {}
 
   static async create(
     parent: ModelRegistry,
     onChange: (agents: AgentSnapshot[]) => void,
     onComplete: (completion: Completion) => void,
+    onFailure: (message: string) => void,
   ) {
-    const agents = new Subagents(parent, onChange, onComplete);
+    const agents = new Subagents(parent, onChange, onComplete, onFailure);
     const registry = createRegistry();
     registry.install(CodingTools);
 
@@ -108,6 +112,7 @@ export class Subagents {
       {
         models: agents.models,
         registry,
+        onReport: (report) => agents.reportRuntimeFailure(report),
         env: ({ cwd }) => {
           if (!cwd) throw new Error("Subagent has no working directory.");
 
@@ -343,9 +348,11 @@ export class Subagents {
     child.waits.add(wait);
     void wait.then(
       () => child.waits.delete(wait),
-      (error) => {
+      () => {
         child.waits.delete(wait);
-        console.error("Durable subagent completion delivery failed:", error);
+        this.reportFailure(
+          `Subagent ${child.snapshot.id} could not finish handling submission ${submission.id}.`,
+        );
       },
     );
   }
@@ -416,13 +423,42 @@ export class Subagents {
         if (ledger)
           completion.usage = this.accountForUsage(child, ledger.models);
       } catch (error) {
-        if (!this.closed)
-          console.error("Could not read subagent usage:", error);
+        // The harness reports storage failure through onReport.
+        if (!(error instanceof SessionFailed))
+          this.reportFailure(
+            `Could not read usage for subagent ${completion.id}.`,
+          );
       }
     }
     child.replies.set(submission.id, completion);
     this.changed();
     if (!this.closed && newReply) this.onComplete(completion);
+  }
+
+  private reportRuntimeFailure(report: Report) {
+    const task = "task" in report ? report.task : undefined;
+    const conversationId =
+      task?.conversationId ??
+      (report.kind === "extension_error" ? report.conversationId : undefined);
+    const child =
+      conversationId === undefined
+        ? undefined
+        : [...this.children.values()].find(
+            ({ conversation }) => conversation.id === conversationId,
+          );
+    const source = child ? `Subagent ${child.snapshot.id}` : "Subagent";
+    this.reportFailure(
+      `${source} runtime failure (${report.kind.replaceAll("_", " ")}).`,
+    );
+  }
+
+  private reportFailure(message: string) {
+    if (this.closed) return;
+    try {
+      this.onFailure(message);
+    } catch {
+      // Reporting must not interrupt settlement or throw from wait cleanup.
+    }
   }
 
   private accountForUsage(

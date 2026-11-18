@@ -1,5 +1,6 @@
 import {
   type ExtensionAPI,
+  type ExtensionContext,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -10,7 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Subagents, type AgentSnapshot, type Completion } from "./subagents.ts";
 
-const messageType = "durable-subagent-completion";
+const completionType = "durable-subagent-completion";
+const failureType = "durable-subagent-failure";
 
 function formatUsage(usage: Completion["usage"]) {
   if (!usage) return "";
@@ -19,50 +21,98 @@ function formatUsage(usage: Completion["usage"]) {
 
 export default function (pi: ExtensionAPI) {
   let runtime: Promise<Subagents> | undefined;
-  let active = false;
-  let refresh = (_agents: AgentSnapshot[]) => {};
+  let session: ExtensionContext | undefined;
+  const awaitingDelivery = new Map<number, string>();
 
   pi.on("session_start", (_event, ctx) => {
-    active = true;
-    refresh = (agents) => {
-      if (!active || !ctx.hasUI) return;
-
-      const running = agents.filter((agent) => agent.pending > 0);
-      ctx.ui.setWidget(
-        "durable-subagents",
-        running.length
-          ? running.map(
-              (agent) => `${agent.id} · ${agent.label} · ${agent.activity}`,
-            )
-          : undefined,
-      );
-    };
+    session = ctx;
   });
 
-  const complete = (completion: Completion) => {
-    if (!active) return;
+  const showFailure = (message: string) => {
+    if (!session) return;
+    if (session.mode === "print") {
+      console.error(message);
+      return;
+    }
 
-    const preview = truncateHead(completion.output, {
-      maxLines: 12,
-      maxBytes: 2_000,
-    });
-    pi.sendMessage(
-      {
-        customType: messageType,
-        content:
-          `Subagent ${completion.id} (${completion.label}): ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
-          (preview.truncated
-            ? `\nUse subagent result with id ${completion.id} and submission ${completion.submission} for this full reply.`
-            : ""),
-        display: true,
-        details: completion,
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
+    try {
+      pi.sendMessage(
+        { customType: failureType, content: message, display: true },
+        { triggerTurn: false },
+      );
+    } catch {
+      console.error(message);
+    }
+  };
+
+  const showDeliveryFailure = (id: string, submission: number) => {
+    showFailure(
+      `Subagent ${id} completion delivery failed for submission ${submission}. Retrieve the saved result with subagent result.`,
     );
   };
 
+  const refresh = (agents: AgentSnapshot[]) => {
+    if (!session?.hasUI) return;
+
+    const running = agents.filter((agent) => agent.pending > 0);
+    session.ui.setWidget(
+      "durable-subagents",
+      running.length
+        ? running.map(
+            (agent) => `${agent.id} · ${agent.label} · ${agent.activity}`,
+          )
+        : undefined,
+    );
+  };
+
+  const complete = (completion: Completion) => {
+    if (!session) return;
+
+    try {
+      const preview = truncateHead(completion.output, {
+        maxLines: 12,
+        maxBytes: 2_000,
+      });
+      if (!session.isIdle())
+        awaitingDelivery.set(completion.submission, completion.id);
+      pi.sendMessage(
+        {
+          customType: completionType,
+          content:
+            `Subagent ${completion.id} (${completion.label}): ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
+            (preview.truncated
+              ? `\nUse subagent result with id ${completion.id} and submission ${completion.submission} for this full reply.`
+              : ""),
+          display: true,
+          details: completion,
+        },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+    } catch {
+      awaitingDelivery.delete(completion.submission);
+      showDeliveryFailure(completion.id, completion.submission);
+    }
+  };
+
+  pi.on("message_start", ({ message }) => {
+    if (message.role !== "custom" || message.customType !== completionType)
+      return;
+    const completion = message.details as Completion | undefined;
+    if (completion) awaitingDelivery.delete(completion.submission);
+  });
+
+  pi.on("agent_settled", ({ aborted }) => {
+    // Escape can drop queued follow-ups before Pi shows them.
+    if (aborted) {
+      for (const [submission, id] of awaitingDelivery)
+        showDeliveryFailure(id, submission);
+    }
+    awaitingDelivery.clear();
+  });
+
   pi.on("session_shutdown", async () => {
-    active = false;
+    session = undefined;
+    awaitingDelivery.clear();
     try {
       if (runtime) await (await runtime).close();
     } finally {
@@ -73,11 +123,18 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_tree", async () => {
     if (runtime) await (await runtime).close();
     runtime = undefined;
+    awaitingDelivery.clear();
     refresh([]);
   });
 
   pi.registerMessageRenderer(
-    messageType,
+    failureType,
+    (message, { outputPad }, theme) =>
+      new Text(theme.fg("error", String(message.content)), outputPad, 0),
+  );
+
+  pi.registerMessageRenderer(
+    completionType,
     (message, { expanded, outputPad }, theme) => {
       const completion = message.details as Completion;
       const color = completion.status === "completed" ? "success" : "warning";
@@ -166,7 +223,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(toolCallId, args, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
-      if (!active) throw new Error("The parent session has closed.");
+      if (!session) throw new Error("The parent session has closed.");
 
       if (args.action === "status" && !runtime) {
         return {
@@ -175,9 +232,14 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      runtime ??= Subagents.create(ctx.modelRegistry, refresh, complete);
+      runtime ??= Subagents.create(
+        ctx.modelRegistry,
+        refresh,
+        complete,
+        showFailure,
+      );
       const agents = await runtime;
-      if (!active) throw new Error("The parent session has closed.");
+      if (!session) throw new Error("The parent session has closed.");
 
       let result: unknown;
       switch (args.action) {
