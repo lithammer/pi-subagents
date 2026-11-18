@@ -12,7 +12,13 @@ import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { openScriptedSession, type ScriptedReply } from "./scripted-pi.ts";
+import {
+  gate,
+  hold,
+  openScriptedSession,
+  openSubagentSession,
+  toolCall,
+} from "./scripted-pi.ts";
 
 const childTask = "Start the child task.";
 const steers = ["Include the first detail.", "Include the second detail."];
@@ -29,6 +35,7 @@ for (const [name, deliveryScenario] of [
     const childReplyHold = hold();
     const parentReplyHold = hold();
     const recoverPrompt = "Retrieve the skipped completion.";
+    const childTurns: string[][] = [];
     let parentCallsWithNotice = 0;
     let childId = "";
     let recoveryRequest: { id: string; submission: number } | undefined;
@@ -61,6 +68,15 @@ for (const [name, deliveryScenario] of [
     }
     startChild.open();
     await childReplyHold.reached;
+    assert.deepEqual(
+      childTurns,
+      [
+        [childTask],
+        [childTask, "read-0", steers[0]],
+        [childTask, "read-0", steers[0], "read-1", steers[1]],
+      ],
+      "Each steer must enter the next model turn after its read",
+    );
     assert.equal(
       completionNotices(session).length,
       0,
@@ -180,17 +196,19 @@ for (const [name, deliveryScenario] of [
           reads.every(({ isError }) => !isError),
           "Child reads must reach the steering boundary",
         );
+        childTurns.push(
+          messages.flatMap((message) => {
+            if (message.role === "user") return [contentText(message.content)];
+            if (message.role === "toolResult") return [message.toolCallId];
+            return [];
+          }),
+        );
         if (reads.length === 0) await startChild.wait;
         if (reads.length < steers.length) {
           return [
             toolCall(`read-${reads.length}`, "read", { path: "fixture.txt" }),
           ];
         }
-        assert.deepEqual(
-          inputs,
-          [childTask, ...steers],
-          "All child inputs must share this answer",
-        );
         await childReplyHold.pause();
         return childReply;
       }
@@ -283,13 +301,24 @@ test(
     const { session, runTool, parentNotices } = await openSubagentSession(
       t,
       tasks[0],
-      (inputs) => {
-        const index = inputs.length - 1;
+      ({ messages }) => {
+        const history = messages.filter(({ role }) => role !== "system");
+        const index = history.filter(({ role }) => role === "user").length - 1;
         assert.ok(
           index < tasks.length,
           "The child must receive each task once",
         );
-        assert.deepEqual(inputs, tasks.slice(0, index + 1));
+        assert.deepEqual(
+          history.map(({ role, content }) => [role, contentText(content)]),
+          [
+            ...tasks.slice(0, index).flatMap((task, turn) => [
+              ["user", task],
+              ["assistant", answers[turn]],
+            ]),
+            ["user", tasks[index]],
+          ],
+          "Each follow-up must see the earlier prompts and replies in order",
+        );
         return { text: answers[index], usage };
       },
     );
@@ -411,49 +440,6 @@ test(
   },
 );
 
-async function openSubagentSession(
-  t: TestContext,
-  childTask: string,
-  reply: (inputs: string[]) => ScriptedReply,
-) {
-  let request: ToolCall | undefined;
-  const parentNotices: string[] = [];
-  const session = await openScriptedSession(t, async ({ messages }) => {
-    const inputs = messages
-      .filter((message) => message.role === "user")
-      .map(({ content }) => contentText(content));
-    if (inputs[0] === childTask) return reply(inputs);
-
-    const prompt = inputs.at(-1);
-    if (!request || prompt !== request.id) {
-      assert.ok(prompt, "The parent must receive a completion or tool prompt");
-      parentNotices.push(prompt);
-      return "Received the completion.";
-    }
-
-    const callId = request.id;
-    const answered = messages.some(
-      (message) =>
-        message.role === "toolResult" && message.toolCallId === callId,
-    );
-    return answered ? "Received the tool result." : [request];
-  });
-
-  async function runTool(callId: string, args: ToolCall["arguments"]) {
-    request = toolCall(callId, "subagent", args);
-    await session.prompt(callId);
-    const result = session.messages.find(
-      (message): message is ToolResultMessage =>
-        message.role === "toolResult" && message.toolCallId === callId,
-    );
-    assert.ok(result, `The parent must receive the ${callId} result`);
-    assert.equal(result.isError, false);
-    return JSON.parse(contentText(result.content));
-  }
-
-  return { session, runTool, parentNotices };
-}
-
 async function waitForCompletion(
   t: TestContext,
   session: AgentSession,
@@ -479,33 +465,4 @@ function customMessages(session: AgentSession, customType: string) {
       (entry): entry is CustomMessageEntry =>
         entry.type === "custom_message" && entry.customType === customType,
     );
-}
-
-function toolCall(
-  id: string,
-  name: string,
-  args: ToolCall["arguments"],
-): ToolCall {
-  return { type: "toolCall", id, name, arguments: args };
-}
-
-function gate() {
-  let open!: () => void;
-  const wait = new Promise<void>((resolve) => {
-    open = resolve;
-  });
-  return { wait, open };
-}
-
-function hold() {
-  const reached = gate();
-  const resume = gate();
-  return {
-    reached: reached.wait,
-    pause() {
-      reached.open();
-      return resume.wait;
-    },
-    release: resume.open,
-  };
 }

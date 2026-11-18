@@ -1,7 +1,9 @@
 import {
+  contentText,
   createAssistantMessageEventStream,
   type AssistantMessage,
   type ToolCall,
+  type ToolResultMessage,
   type TranscriptContext,
   type Usage,
 } from "@earendil-works/pi-ai";
@@ -138,4 +140,87 @@ export async function openScriptedSession(
   }));
   await session.bindExtensions({ mode: "rpc" });
   return session;
+}
+
+export async function openSubagentSession(
+  t: TestContext,
+  childTask: string,
+  reply: (context: TranscriptContext) => ScriptedReply | Promise<ScriptedReply>,
+  prepareWorkspace?: (cwd: string) => Promise<void>,
+  unblockModelReplies?: () => void,
+) {
+  let request: ToolCall | undefined;
+  const parentNotices: string[] = [];
+  const session = await openScriptedSession(
+    t,
+    async (context) => {
+      const { messages } = context;
+      const inputs = messages
+        .filter((message) => message.role === "user")
+        .map(({ content }) => contentText(content));
+      if (inputs[0] === childTask) return reply(context);
+
+      const prompt = inputs.at(-1);
+      if (!request || prompt !== request.id) {
+        assert.ok(
+          prompt,
+          "The parent must receive a completion or tool prompt",
+        );
+        parentNotices.push(prompt);
+        return "Received the completion.";
+      }
+
+      const callId = request.id;
+      const answered = messages.some(
+        (message) =>
+          message.role === "toolResult" && message.toolCallId === callId,
+      );
+      return answered ? "Received the tool result." : [request];
+    },
+    prepareWorkspace,
+    unblockModelReplies,
+  );
+
+  async function runTool(callId: string, args: ToolCall["arguments"]) {
+    request = toolCall(callId, "subagent", args);
+    await session.prompt(callId);
+    const result = session.messages.find(
+      (message): message is ToolResultMessage =>
+        message.role === "toolResult" && message.toolCallId === callId,
+    );
+    assert.ok(result, `The parent must receive the ${callId} result`);
+    assert.equal(result.isError, false);
+    return JSON.parse(contentText(result.content));
+  }
+
+  return { session, runTool, parentNotices };
+}
+
+export function toolCall(
+  id: string,
+  name: string,
+  args: ToolCall["arguments"],
+): ToolCall {
+  return { type: "toolCall", id, name, arguments: args };
+}
+
+export function gate() {
+  let open!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+}
+
+export function hold() {
+  const reached = gate();
+  const resume = gate();
+  return {
+    reached: reached.wait,
+    pause() {
+      reached.open();
+      return resume.wait;
+    },
+    release: resume.open,
+  };
 }
