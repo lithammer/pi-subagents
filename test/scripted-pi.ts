@@ -28,7 +28,10 @@ export type ScriptedReply =
 
 export async function openScriptedSession(
   t: TestContext,
-  reply: (context: TranscriptContext) => Promise<ScriptedReply>,
+  reply: (
+    context: TranscriptContext,
+    signal?: AbortSignal,
+  ) => Promise<ScriptedReply>,
   prepareWorkspace?: (cwd: string) => Promise<void>,
   unblockModelReplies = () => {},
 ): Promise<AgentSession> {
@@ -73,7 +76,7 @@ export async function openScriptedSession(
         cost,
       },
     ],
-    streamSimple(model, context) {
+    streamSimple(model, context, options) {
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = {
         role: "assistant",
@@ -86,7 +89,7 @@ export async function openScriptedSession(
         timestamp: Date.now(),
       };
       stream.push({ type: "start", partial: message });
-      void reply(context).then(
+      void reply(context, options?.signal).then(
         (answer) => {
           if (Array.isArray(answer)) {
             message.content = answer;
@@ -144,8 +147,11 @@ export async function openScriptedSession(
 
 export async function openSubagentSession(
   t: TestContext,
-  childTask: string,
-  reply: (context: TranscriptContext) => ScriptedReply | Promise<ScriptedReply>,
+  childTasks: string | readonly string[],
+  reply: (
+    context: TranscriptContext,
+    signal?: AbortSignal,
+  ) => ScriptedReply | Promise<ScriptedReply>,
   prepareWorkspace?: (cwd: string) => Promise<void>,
   unblockModelReplies?: () => void,
 ) {
@@ -153,12 +159,18 @@ export async function openSubagentSession(
   const parentNotices: string[] = [];
   const session = await openScriptedSession(
     t,
-    async (context) => {
+    async (context, signal) => {
       const { messages } = context;
       const inputs = messages
         .filter((message) => message.role === "user")
         .map(({ content }) => contentText(content));
-      if (inputs[0] === childTask) return reply(context);
+      if (
+        typeof childTasks === "string"
+          ? inputs[0] === childTasks
+          : childTasks.includes(inputs[0])
+      ) {
+        return reply(context, signal);
+      }
 
       const prompt = inputs.at(-1);
       if (!request || prompt !== request.id) {
