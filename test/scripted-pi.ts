@@ -8,9 +8,11 @@ import {
   type Usage,
 } from "@earendil-works/pi-ai";
 import {
-  createAgentSession,
-  type AgentSession,
-  DefaultResourceLoader,
+  type AgentSessionRuntime,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  type ExtensionFactory,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -26,7 +28,7 @@ const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 export type ScriptedReply =
   string | ToolCall[] | { text: string; usage: Usage } | { error: string };
 
-export async function openScriptedSession(
+export async function openScriptedRuntime(
   t: TestContext,
   reply: (
     context: TranscriptContext,
@@ -34,23 +36,19 @@ export async function openScriptedSession(
   ) => Promise<ScriptedReply>,
   prepareWorkspace?: (cwd: string) => Promise<void>,
   unblockModelReplies = () => {},
-): Promise<AgentSession> {
-  const cwd = await mkdtemp(join(tmpdir(), "pi-subagent-notices-"));
-  const providerErrors: unknown[] = [];
-  let session: AgentSession | undefined;
+  extension?: { factory: ExtensionFactory; beforeSubagents?: true },
+) {
+  const cwd = await mkdtemp(join(tmpdir(), "pi-subagent-test-"));
+  const errors: unknown[] = [];
+  let runtime: AgentSessionRuntime | undefined;
+  let disposing: Promise<void> | undefined;
+  const quit = () => (disposing ??= runtime?.dispose());
   t.after(async () => {
     try {
       // Scripted model replies must finish before abort can wait for idle.
       unblockModelReplies();
-      if (session) {
-        await session.abort();
-        await session.extensionRunner.emit({
-          type: "session_shutdown",
-          reason: "quit",
-        });
-        session.dispose();
-      }
-      assert.deepEqual(providerErrors, []);
+      await quit();
+      assert.deepEqual(errors, []);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -109,7 +107,7 @@ export async function openScriptedSession(
           stream.push({ type: "done", reason, message });
         },
         (error) => {
-          providerErrors.push(error);
+          errors.push(error);
           message.stopReason = "error";
           message.errorMessage = String(error);
           stream.push({ type: "error", reason: "error", error: message });
@@ -121,28 +119,54 @@ export async function openScriptedSession(
   const model = models.getModel("scripted", "scripted");
   assert.ok(model);
 
-  const resourceLoader = new DefaultResourceLoader({
-    cwd,
-    agentDir: cwd,
-    noExtensions: true,
-    noSkills: true,
-    noContextFiles: true,
-    additionalExtensionPaths: [
-      fileURLToPath(new URL("../src/index.ts", import.meta.url)),
-    ],
-  });
-  await resourceLoader.reload();
-  ({ session } = await createAgentSession({
-    cwd,
-    agentDir: cwd,
-    model,
-    modelRuntime: models,
-    resourceLoader,
-    sessionManager: SessionManager.inMemory(cwd),
-    tools: ["subagent", "read"],
-  }));
-  await session.bindExtensions({ mode: "rpc" });
-  return session;
+  runtime = await createAgentSessionRuntime(
+    async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+      const services = await createAgentSessionServices({
+        cwd,
+        agentDir,
+        modelRuntime: models,
+        resourceLoaderOptions: {
+          noExtensions: true,
+          noSkills: true,
+          noContextFiles: true,
+          additionalExtensionPaths: [
+            fileURLToPath(new URL("../src/index.ts", import.meta.url)),
+          ],
+          extensionFactories: extension && [extension.factory],
+          extensionsOverride: extension?.beforeSubagents
+            ? (loaded) => ({
+                ...loaded,
+                extensions: loaded.extensions.toReversed(),
+              })
+            : undefined,
+        },
+      });
+      const result = await createAgentSessionFromServices({
+        services,
+        sessionManager,
+        sessionStartEvent,
+        model,
+        tools: ["subagent", "read", "bash"],
+      });
+      return { ...result, services, diagnostics: services.diagnostics };
+    },
+    { cwd, agentDir: cwd, sessionManager: SessionManager.inMemory(cwd) },
+  );
+  const bind = (session: AgentSessionRuntime["session"]) =>
+    session.bindExtensions({
+      mode: "rpc",
+      onError: (error) => errors.push(error),
+    });
+  runtime.setRebindSession(bind);
+  await bind(runtime.session);
+  return { runtime, quit };
+}
+
+export async function openScriptedSession(
+  ...args: Parameters<typeof openScriptedRuntime>
+) {
+  const { runtime } = await openScriptedRuntime(...args);
+  return runtime.session;
 }
 
 export async function openSubagentSession(

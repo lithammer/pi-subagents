@@ -13,6 +13,12 @@ import { Subagents, type AgentSnapshot, type Completion } from "./subagents.ts";
 
 const completionType = "durable-subagent-completion";
 const failureType = "durable-subagent-failure";
+const wakeType = "durable-subagent-wake";
+
+type Wake = {
+  owner: Promise<Subagents>;
+  completion: Completion;
+};
 
 function formatUsage(usage: Completion["usage"]) {
   if (!usage) return "";
@@ -22,28 +28,99 @@ function formatUsage(usage: Completion["usage"]) {
 export default function (pi: ExtensionAPI) {
   let runtime: Promise<Subagents> | undefined;
   let session: ExtensionContext | undefined;
+  let treeMove:
+    { from: string | null; to: string | null } | "detached" | undefined;
   const awaitingDelivery = new Map<number, string>();
+  const wakes = new WeakMap<object, Wake>();
 
   pi.on("session_start", (_event, ctx) => {
     session = ctx;
   });
 
-  const showFailure = (message: string) => {
-    if (!session) return;
-    if (session.mode === "print") {
-      console.error(message);
+  const ownsBranch = (ctx: ExtensionContext) => {
+    if (treeMove === "detached") return false;
+    if (!treeMove) return true;
+
+    const { from, to } = treeMove;
+    // Pi changes the leaf before running session_tree handlers.
+    const branchPoint = ctx.sessionManager
+      .getBranch()
+      .findLast(
+        (entry) =>
+          entry.id === from ||
+          entry.id === to ||
+          (entry.type === "branch_summary" && entry.parentId === from),
+      );
+    return (branchPoint?.id ?? null) === from;
+  };
+
+  pi.on("session_before_tree", ({ preparation }, ctx) => {
+    if (!ownsBranch(ctx)) {
+      treeMove = "detached";
       return;
     }
 
-    try {
-      pi.sendMessage(
-        { customType: failureType, content: message, display: true },
-        { triggerTurn: false },
-      );
-    } catch {
-      console.error(message);
-    }
+    const target = ctx.sessionManager.getEntry(preparation.targetId);
+    if (!target) return;
+
+    const editsMessage =
+      target.type === "custom_message" ||
+      (target.type === "message" && target.message.role === "user");
+    treeMove = {
+      from: preparation.oldLeafId,
+      to: editsMessage ? target.parentId : target.id,
+    };
+  });
+
+  pi.on("input", (_event, ctx) => {
+    if (treeMove && ctx.isIdle() && ownsBranch(ctx)) treeMove = undefined;
+  });
+
+  const deliver = (send: (ctx: ExtensionContext, idle: boolean) => void) => {
+    const parent = session;
+    const owner = runtime;
+    if (!parent) return;
+
+    const trySend = () => {
+      if (session !== parent || runtime !== owner) return;
+      let idle: boolean;
+      try {
+        idle = parent.isIdle();
+      } catch {
+        // Direct SDK disposal invalidates the context without a shutdown event.
+        return;
+      }
+
+      if (!ownsBranch(parent)) {
+        treeMove = "detached";
+        return;
+      }
+      if (treeMove && !idle && !parent.signal) {
+        // Pi has no end event for a vetoed tree move.
+        setTimeout(trySend, 10).unref();
+        return;
+      }
+      send(parent, idle);
+    };
+    trySend();
   };
+
+  const showFailure = (message: string) =>
+    deliver((parent) => {
+      if (parent.mode === "print") {
+        console.error(message);
+        return;
+      }
+
+      try {
+        pi.sendMessage(
+          { customType: failureType, content: message, display: true },
+          { triggerTurn: false },
+        );
+      } catch {
+        console.error(message);
+      }
+    });
 
   const showDeliveryFailure = (id: string, submission: number) => {
     showFailure(
@@ -65,40 +142,75 @@ export default function (pi: ExtensionAPI) {
     );
   };
 
-  const complete = (completion: Completion) => {
-    if (!session) return;
+  const complete = (completion: Completion) =>
+    deliver((_parent, idle) => {
+      if (!runtime) return;
 
-    try {
-      const preview = truncateHead(completion.output, {
-        maxLines: 12,
-        maxBytes: 2_000,
-      });
-      if (!session.isIdle())
-        awaitingDelivery.set(completion.submission, completion.id);
-      pi.sendMessage(
-        {
-          customType: completionType,
-          content:
-            `Subagent ${completion.id} (${completion.label}): ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
-            (preview.truncated
-              ? `\nUse subagent result with id ${completion.id} and submission ${completion.submission} for this full reply.`
-              : ""),
-          display: true,
-          details: completion,
-        },
-        { triggerTurn: true, deliverAs: "followUp" },
-      );
-    } catch {
-      awaitingDelivery.delete(completion.submission);
-      showDeliveryFailure(completion.id, completion.submission);
-    }
+      const token = {};
+      wakes.set(token, { owner: runtime, completion });
+      if (!idle) awaitingDelivery.set(completion.submission, completion.id);
+      try {
+        // Pi can hold a wake through a tree move while agent_settled runs.
+        pi.sendMessage(
+          {
+            customType: wakeType,
+            content: [],
+            display: false,
+            details: token,
+          },
+          { triggerTurn: true, deliverAs: "followUp" },
+        );
+      } catch {
+        awaitingDelivery.delete(completion.submission);
+        showDeliveryFailure(completion.id, completion.submission);
+      }
+    });
+
+  const getReply = (token: unknown, ctx: ExtensionContext) => {
+    if (!token || typeof token !== "object") return;
+    const wake = wakes.get(token);
+    if (wake && wake.owner === runtime && ownsBranch(ctx))
+      return wake.completion;
   };
 
-  pi.on("message_start", ({ message }) => {
-    if (message.role !== "custom" || message.customType !== completionType)
+  pi.on("before_agent_start", (event, ctx) => {
+    if (
+      event.messageType === "custom" &&
+      event.message.customType === wakeType &&
+      !getReply(event.message.details, ctx)
+    )
+      ctx.abort();
+  });
+
+  pi.on("message_start", ({ message }, ctx) => {
+    if (message.role !== "custom" || message.customType !== wakeType) return;
+    const completion = getReply(message.details, ctx);
+    if (!completion) {
+      delete message.details;
       return;
-    const completion = message.details as Completion | undefined;
-    if (completion) awaitingDelivery.delete(completion.submission);
+    }
+
+    const preview = truncateHead(completion.output, {
+      maxLines: 12,
+      maxBytes: 2_000,
+    });
+    message.customType = completionType;
+    message.content =
+      `Subagent ${completion.id} (${completion.label}): ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
+      (preview.truncated
+        ? `\nUse subagent result with id ${completion.id} and submission ${completion.submission} for this full reply.`
+        : "");
+    message.display = true;
+    message.details = completion;
+    awaitingDelivery.delete(completion.submission);
+  });
+
+  pi.on("context", ({ messages }) => {
+    // A discarded wake can still be in Pi's transcript.
+    const kept = messages.filter(
+      (message) => message.role !== "custom" || message.customType !== wakeType,
+    );
+    if (kept.length !== messages.length) return { messages: kept };
   });
 
   pi.on("agent_settled", ({ aborted }) => {
@@ -112,6 +224,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     session = undefined;
+    treeMove = undefined;
     awaitingDelivery.clear();
     try {
       if (runtime) await (await runtime).close();
@@ -121,10 +234,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_tree", async () => {
-    if (runtime) await (await runtime).close();
-    runtime = undefined;
-    awaitingDelivery.clear();
-    refresh([]);
+    try {
+      if (runtime) await (await runtime).close();
+    } finally {
+      runtime = undefined;
+      treeMove = undefined;
+      awaitingDelivery.clear();
+      refresh([]);
+    }
   });
 
   pi.registerMessageRenderer(
