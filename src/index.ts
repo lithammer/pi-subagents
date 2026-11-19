@@ -196,7 +196,7 @@ export default function (pi: ExtensionAPI) {
     });
     message.customType = completionType;
     message.content =
-      `Subagent ${completion.id} (${completion.label}): ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
+      `Subagent ${completion.id} (${completion.label}), submission ${completion.submission}: ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
       (preview.truncated
         ? `\nUse subagent result with id ${completion.id} and submission ${completion.submission} for this full reply.`
         : "");
@@ -257,7 +257,7 @@ export default function (pi: ExtensionAPI) {
       const color = completion.status === "completed" ? "success" : "warning";
       const title = theme.fg(
         color,
-        `${completion.id} · ${completion.label} · ${completion.status}`,
+        `${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}`,
       );
       const preview = truncateHead(
         completion.output,
@@ -286,7 +286,8 @@ export default function (pi: ExtensionAPI) {
       "Children share the parent's working directory. Their native read/bash/edit/write tools match the parent's active tool names and bypass parent permission hooks and custom tool overrides. " +
       "Spawn returns immediately and completion arrives as a notification. Children take the parent's model, thinking level, and system prompt at spawn. " +
       "Reuse an id with send to retain that selection and conversation. Children have no parent extensions, MCP, or nested delegation. " +
-      "Result returns a reply by submission id, or the latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). " +
+      "Spawn and send return a submission number, also shown in completion notices. These are runtime-assigned IDs, not per-child sequence numbers; use the returned number rather than guessing. " +
+      "Result returns a reply by submission number, or the latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). " +
       "Transcript shows a child's current activity and recent model and tool failures, with no raw diagnostic text. " +
       "Status lists agents. Stop cancels outstanding work and keeps the conversation for another send. Children live only for this Pi session.",
     promptSnippet:
@@ -322,7 +323,7 @@ export default function (pi: ExtensionAPI) {
       submission: Type.Optional(
         Type.Integer({
           description:
-            "For result: retrieve this exact reply instead of the latest",
+            "For result: retrieve the exact reply using the submission number from spawn/send or its completion notice instead of the latest",
         }),
       ),
       label: Type.Optional(

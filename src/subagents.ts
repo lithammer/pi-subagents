@@ -186,14 +186,14 @@ export class Subagents {
       this.changed();
     });
 
-    await this.submit(child, task, "followUp");
-    return { ...child.snapshot };
+    const submission = await this.submit(child, task, "followUp");
+    return { ...child.snapshot, submission };
   }
 
   async send(id: string, task: string, delivery: "followUp" | "steer") {
     const child = this.child(id);
-    await this.submit(child, task, delivery);
-    return { ...child.snapshot };
+    const submission = await this.submit(child, task, delivery);
+    return { ...child.snapshot, submission };
   }
 
   list() {
@@ -245,11 +245,17 @@ export class Subagents {
       submission === undefined
         ? [...child.replies.values()].at(-1)
         : child.replies.get(submission);
+    if (!reply && submission !== undefined)
+      throw new Error(
+        `No saved reply for submission ${submission} of ${id}. ` +
+          `Saved submission numbers: ${[...child.replies.keys()].join(", ") || "none"}. ` +
+          "Use one of those numbers with result, or use the submission number from spawn/send once its completion notification arrives.",
+      );
     if (!reply)
       return {
         ...child.snapshot,
         output:
-          "No matching completed reply. A notification arrives when the task settles.",
+          "No completed reply yet. A notification arrives when the task settles.",
       };
 
     const result = { ...reply };
@@ -355,6 +361,7 @@ export class Subagents {
         );
       },
     );
+    return submission.id;
   }
 
   private async settle(child: Child, submission: Submission) {
