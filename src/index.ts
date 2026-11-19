@@ -4,7 +4,7 @@ import {
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -259,20 +259,19 @@ export default function (pi: ExtensionAPI) {
         color,
         `${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}`,
       );
-      const preview = truncateHead(
-        completion.output,
-        expanded ? undefined : { maxLines: 4, maxBytes: 700 },
+      const card = new Box(outputPad, 1, (text) =>
+        theme.bg("customMessageBg", text),
       );
-      const body =
-        preview.content +
-        (preview.truncated
-          ? `\nUse subagent result: ${completion.id}, submission ${completion.submission}`
-          : "");
-      return new Text(
-        `${title}${formatUsage(completion.usage)}\n${body}`,
-        outputPad,
-        0,
+      card.addChild(
+        new Text(
+          expanded
+            ? `${title}${formatUsage(completion.usage)}\n${completion.output}`
+            : title,
+          0,
+          0,
+        ),
       );
+      return card;
     },
   );
 
