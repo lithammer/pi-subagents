@@ -19,6 +19,7 @@ import { truncateHead } from "@earendil-works/pi-coding-agent";
 import {
   AssistantEntry,
   Harness,
+  LiveDoc,
   MemoryStorage,
   SessionFailed,
   ToolResultEntry,
@@ -75,7 +76,8 @@ type SpawnConfig = {
 };
 
 type Child = {
-  snapshot: AgentSnapshot;
+  state: Omit<AgentSnapshot, "activity">;
+  liveActivity?: string;
   conversation: Conversation;
   watch: ConversationWatch;
   waits: Set<Promise<void>>;
@@ -172,14 +174,13 @@ export class Subagents {
     const watch = await conversation.watch(context);
     const id = `agent-${randomUUID().slice(0, 8)}`;
     const child: Child = {
-      snapshot: {
+      state: {
         id,
         label,
         model,
         thinking: config.thinking,
         status: "idle",
         pending: 0,
-        activity: "ready",
       },
       conversation,
       watch,
@@ -192,32 +193,31 @@ export class Subagents {
     watch.start(async (call) => {
       if (call.kind !== "value" || this.closed) return;
 
-      const live = call.value.docs["pi.live"] as LiveState | undefined;
+      const live = call.value.docs[LiveDoc.definition.kind] as
+        LiveState | undefined;
       const tool = live?.tools?.find((slot) => slot.status === "running");
-      child.snapshot.activity = tool
+      child.liveActivity = tool
         ? `using ${toolName(tool.name)}`
         : live?.generation?.retry
           ? "waiting to retry the model request"
           : live?.generation
             ? "thinking"
-            : child.snapshot.pending
-              ? "queued"
-              : "ready";
+            : undefined;
       this.changed();
     });
 
     const submission = await this.submit(child, task, "followUp");
-    return { ...child.snapshot, submission };
+    return { ...snapshot(child), submission };
   }
 
   async send(id: string, task: string, delivery: "followUp" | "steer") {
     const child = this.child(id);
     const submission = await this.submit(child, task, delivery);
-    return { ...child.snapshot, submission };
+    return { ...snapshot(child), submission };
   }
 
   list() {
-    return [...this.children.values()].map((child) => ({ ...child.snapshot }));
+    return Array.from(this.children.values(), snapshot);
   }
 
   async transcript(id: string) {
@@ -238,7 +238,7 @@ export class Subagents {
       cursor = page.next;
     } while (cursor && failures.length < limit);
 
-    const { model, status, pending, activity } = child.snapshot;
+    const { model, status, pending, activity } = snapshot(child);
     return {
       id,
       status,
@@ -273,7 +273,7 @@ export class Subagents {
       );
     if (!reply)
       return {
-        ...child.snapshot,
+        ...snapshot(child),
         output:
           "No completed reply yet. A notification arrives when the task settles.",
       };
@@ -297,10 +297,9 @@ export class Subagents {
     const child = this.child(id);
     await child.conversation.abort(context);
     await Promise.all([...child.waits]);
-    child.snapshot.status = "stopped";
-    child.snapshot.activity = "stopped; context retained";
+    child.state.status = "stopped";
     this.changed();
-    return { ...child.snapshot };
+    return snapshot(child);
   }
 
   close() {
@@ -352,9 +351,9 @@ export class Subagents {
     delivery: "followUp" | "steer",
   ) {
     this.assertOpen();
-    child.snapshot.pending++;
-    child.snapshot.status = "running";
-    child.snapshot.activity = "queued";
+    child.state.pending++;
+    child.state.status = "running";
+    child.liveActivity = undefined;
     this.changed();
 
     let submission: Submission;
@@ -364,8 +363,8 @@ export class Subagents {
         context,
       );
     } catch (error) {
-      child.snapshot.pending--;
-      child.snapshot.status = child.snapshot.pending ? "running" : "failed";
+      child.state.pending--;
+      child.state.status = child.state.pending ? "running" : "failed";
       this.changed();
       throw error;
     }
@@ -377,7 +376,7 @@ export class Subagents {
       () => {
         child.waits.delete(wait);
         this.reportFailure(
-          `Subagent ${child.snapshot.id} could not finish handling submission ${submission.id}.`,
+          `Subagent ${child.state.id} could not finish handling submission ${submission.id}.`,
         );
       },
     );
@@ -405,8 +404,8 @@ export class Subagents {
             )
             .join("\n") ?? "";
         completion = {
-          id: child.snapshot.id,
-          label: child.snapshot.label,
+          id: child.state.id,
+          label: child.state.label,
           submission: submission.id,
           status: "completed",
           output,
@@ -416,8 +415,8 @@ export class Subagents {
       } else {
         const stopped = settled.reason === "aborted";
         completion = {
-          id: child.snapshot.id,
-          label: child.snapshot.label,
+          id: child.state.id,
+          label: child.state.label,
           submission: submission.id,
           status: stopped ? "stopped" : "failed",
           // Pi saves completion notices and tool results in the parent session.
@@ -426,16 +425,16 @@ export class Subagents {
       }
     } catch {
       completion = {
-        id: child.snapshot.id,
-        label: child.snapshot.label,
+        id: child.state.id,
+        label: child.state.label,
         submission: submission.id,
         status: "failed",
         output: "Could not read the child submission.",
       };
     }
 
-    child.snapshot.pending--;
-    child.snapshot.status = child.snapshot.pending
+    child.state.pending--;
+    child.state.status = child.state.pending
       ? "running"
       : completion.status === "completed"
         ? "idle"
@@ -473,7 +472,7 @@ export class Subagents {
         : [...this.children.values()].find(
             ({ conversation }) => conversation.id === conversationId,
           );
-    const source = child ? `Subagent ${child.snapshot.id}` : "Subagent";
+    const source = child ? `Subagent ${child.state.id}` : "Subagent";
     this.reportFailure(
       `${source} runtime failure (${report.kind.replaceAll("_", " ")}).`,
     );
@@ -531,6 +530,22 @@ export class Subagents {
   private changed() {
     if (!this.closed) this.onChange(this.list());
   }
+}
+
+const settledActivity = {
+  idle: "ready",
+  stopped: "stopped; context retained",
+  failed: "failed",
+};
+
+function snapshot({ state, liveActivity }: Child): AgentSnapshot {
+  // The watch can clear live activity before settle() drops the pending count.
+  // A send can start after stop() copies the waits.
+  const activity =
+    state.pending > 0 || state.status === "running"
+      ? (liveActivity ?? "queued")
+      : settledActivity[state.status];
+  return { ...state, activity };
 }
 
 function describeFailure(entry: EntryRecord) {
