@@ -10,7 +10,10 @@ import {
   isContextOverflow,
   isRetryableAssistantError,
 } from "@earendil-works/pi-ai";
-import { createModels } from "@earendil-works/pi-ai/models";
+import {
+  createModels,
+  getSupportedThinkingLevels,
+} from "@earendil-works/pi-ai/models";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { truncateHead } from "@earendil-works/pi-coding-agent";
 import {
@@ -41,6 +44,7 @@ export type AgentSnapshot = {
   id: string;
   label: string;
   model: string;
+  thinking: ModelThinkingLevel;
   status: "running" | "idle" | "stopped" | "failed";
   pending: number;
   activity: string;
@@ -132,6 +136,21 @@ export class Subagents {
 
   async spawn(task: string, label: string, config: SpawnConfig) {
     this.assertOpen();
+    const model = `${config.model.provider}/${config.model.id}`;
+    // The configured-provider list is a cache that a failed refresh leaves
+    // stale; fall back to the live lookup the child authenticates with.
+    if (
+      !this.parent.hasConfiguredAuth(config.model) &&
+      !(await this.parent.getProviderAuth(config.model.provider))
+    )
+      throw new Error(
+        `No authentication for provider "${config.model.provider}". Log in to it in Pi before spawning a subagent on ${model}.`,
+      );
+    const supported = getSupportedThinkingLevels(config.model);
+    if (!supported.includes(config.thinking))
+      throw new Error(
+        `Model ${model} does not support thinking level "${config.thinking}". Pass thinking as one of: ${supported.join(", ")}.`,
+      );
     this.addProvider(config.model.provider);
 
     const conversation = await this.harness.createConversation(
@@ -156,7 +175,8 @@ export class Subagents {
       snapshot: {
         id,
         label,
-        model: `${config.model.provider}/${config.model.id}`,
+        model,
+        thinking: config.thinking,
         status: "idle",
         pending: 0,
         activity: "ready",
@@ -249,7 +269,7 @@ export class Subagents {
       throw new Error(
         `No saved reply for submission ${submission} of ${id}. ` +
           `Saved submission numbers: ${[...child.replies.keys()].join(", ") || "none"}. ` +
-          "Use one of those numbers with result, or use the submission number from spawn/send once its completion notification arrives.",
+          "Use one of those numbers with subagent_result, or use the submission number from subagent_spawn or subagent_send once its completion notification arrives.",
       );
     if (!reply)
       return {

@@ -131,7 +131,7 @@ for (const [name, deliveryScenario] of [
           submissionReference,
           "The warning must identify the saved submission",
         );
-        assert.match(warning, /subagent result/);
+        assert.match(warning, /subagent_result/);
         recoveryRequest = {
           id: childReference[1],
           submission: Number(submissionReference[1]),
@@ -219,7 +219,7 @@ for (const [name, deliveryScenario] of [
       }
       const results = messages
         .filter((message) => message.role === "toolResult")
-        .filter((message) => message.toolName === "subagent");
+        .filter((message) => message.toolName.startsWith("subagent_"));
       assert.ok(
         results.every(({ isError }) => !isError),
         "Parent subagent calls must succeed",
@@ -229,25 +229,17 @@ for (const [name, deliveryScenario] of [
         recovered = results.find(({ toolCallId }) => toolCallId === "recover");
         return recovered
           ? "Recovered the saved reply."
-          : [
-              toolCall("recover", "subagent", {
-                action: "result",
-                ...recoveryRequest,
-              }),
-            ];
+          : [toolCall("recover", "subagent_result", recoveryRequest)];
       }
       if (results.length === 0) {
-        return [
-          toolCall("spawn", "subagent", { action: "spawn", task: childTask }),
-        ];
+        return [toolCall("spawn", "subagent_spawn", { task: childTask })];
       }
       if (results.length === 1) {
         const { id } = JSON.parse(contentText(results[0].content));
         assert.equal(typeof id, "string");
         childId = id;
         return steers.map((task, index) =>
-          toolCall(`steer-${index}`, "subagent", {
-            action: "send",
+          toolCall(`steer-${index}`, "subagent_send", {
             delivery: "steer",
             id,
             task,
@@ -323,16 +315,12 @@ test(
       },
     );
 
-    const { id } = await runTool("spawn", { action: "spawn", task: tasks[0] });
+    const { id } = await runTool("spawn", "spawn", { task: tasks[0] });
     assert.equal(typeof id, "string");
     const submissions: number[] = [];
     for (const [index, answer] of answers.entries()) {
       if (index > 0) {
-        await runTool(`send-${index}`, {
-          action: "send",
-          id,
-          task: tasks[index],
-        });
+        await runTool(`send-${index}`, "send", { id, task: tasks[index] });
       }
       const notice = await waitForCompletion(t, session, index + 1);
       const text = contentText(notice.content);
@@ -361,11 +349,7 @@ test(
       submission !== undefined,
       "The earlier submission must be recorded",
     );
-    const result = await runTool("exact-result", {
-      action: "result",
-      id,
-      submission,
-    });
+    const result = await runTool("exact-result", "result", { id, submission });
     assert.equal(result.id, id);
     assert.equal(result.status, "completed");
     assert.equal(
@@ -380,7 +364,7 @@ test(
     );
     checkUsage(answers.length);
 
-    const latest = await runTool("latest-result", { action: "result", id });
+    const latest = await runTool("latest-result", "result", { id });
     assert.equal(
       latest.output,
       answers.at(-1),
@@ -425,12 +409,9 @@ test(
       error: `HTTP 401 request rejected with ${credential}`,
     }));
 
-    const { id } = await runTool("spawn", { action: "spawn", task });
+    const { id } = await runTool("spawn", "spawn", { task });
     await waitForCompletion(t, session, 1);
-    const transcript = await runTool("transcript", {
-      action: "transcript",
-      id,
-    });
+    const transcript = await runTool("transcript", "transcript", { id });
 
     assert.ok(
       !JSON.stringify(session.sessionManager.getEntries()).includes(credential),

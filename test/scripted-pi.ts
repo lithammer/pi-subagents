@@ -146,7 +146,13 @@ export async function openScriptedRuntime(
         sessionManager,
         sessionStartEvent,
         model,
-        tools: ["subagent", "read", "bash"],
+        tools: [
+          ...["spawn", "send", "result", "transcript", "status", "stop"].map(
+            (action) => `subagent_${action}`,
+          ),
+          "read",
+          "bash",
+        ],
       });
       return { ...result, services, diagnostics: services.diagnostics };
     },
@@ -217,19 +223,32 @@ export async function openSubagentSession(
     unblockModelReplies,
   );
 
-  async function runTool(callId: string, args: ToolCall["arguments"]) {
-    request = toolCall(callId, "subagent", args);
+  async function runTool(
+    callId: string,
+    action: string,
+    args: ToolCall["arguments"],
+  ) {
+    const result = await callTool(callId, action, args);
+    assert.equal(result.isError, false, contentText(result.content));
+    return JSON.parse(contentText(result.content));
+  }
+
+  async function callTool(
+    callId: string,
+    action: string,
+    args: ToolCall["arguments"],
+  ) {
+    request = toolCall(callId, `subagent_${action}`, args);
     await session.prompt(callId);
     const result = session.messages.find(
       (message): message is ToolResultMessage =>
         message.role === "toolResult" && message.toolCallId === callId,
     );
     assert.ok(result, `The parent must receive the ${callId} result`);
-    assert.equal(result.isError, false);
-    return JSON.parse(contentText(result.content));
+    return result;
   }
 
-  return { session, runTool, parentNotices };
+  return { session, runTool, callTool, parentNotices };
 }
 
 export function toolCall(

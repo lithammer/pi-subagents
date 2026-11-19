@@ -6,8 +6,10 @@ in the background.
 - Keep working while agents run. Pi notifies you when they finish.
 - Completion notices show each agent's cumulative token usage and cost. Pi
   adds pending child spend to its session totals on the next subagent tool call.
-- New agents use your current model and thinking level. Send a follow-up to
-  the same agent to keep its model, thinking level, and conversation.
+- New agents use your current model and thinking level, unless you ask for
+  another, for example "use openai-codex/gpt-6-sol at high thinking". The
+  provider must be logged in to Pi. Send a follow-up to the same agent to keep
+  its model, thinking level, and conversation.
 - Run `/agents` to list agents or `/agents stop <id>` to stop one. Agents
   live for the current Pi session.
 

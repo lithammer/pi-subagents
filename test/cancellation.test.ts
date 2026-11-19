@@ -46,7 +46,7 @@ test(
           assert.ok(signal.aborted);
           return "Parent finished.";
         }
-        return [toolCall("spawn", "subagent", { action: "spawn", task })];
+        return [toolCall("spawn", "subagent_spawn", { task })];
       },
       undefined,
       () => {
@@ -97,19 +97,19 @@ test(
       child.release,
     );
 
-    const { id } = await runTool("spawn", { action: "spawn", task });
+    const { id } = await runTool("spawn", "spawn", { task });
     await child.reached;
-    await runTool("stop", { action: "stop", id });
+    await runTool("stop", "stop", { id });
     await session.waitForIdle();
-    const stopped = await runTool("stopped-result", { action: "result", id });
+    const stopped = await runTool("stopped-result", "result", { id });
     assert.equal(stopped.status, "stopped");
-    await runTool("resume", { action: "send", id, task: next });
+    await runTool("resume", "send", { id, task: next });
     await t.waitFor(
       () => assert.ok(parentNotices.some((n) => n.endsWith(answer))),
       { interval: 10, timeout: 5_000 },
     );
     await session.waitForIdle();
-    const resumed = await runTool("resumed-result", { action: "result", id });
+    const resumed = await runTool("resumed-result", "result", { id });
     assert.equal(resumed.status, "completed");
     assert.equal(resumed.output, answer);
   },
@@ -144,15 +144,12 @@ test(
       },
     );
 
-    const { id } = await runTool("spawn-target", {
-      action: "spawn",
-      task: targetTask,
-    });
-    await runTool("spawn-sibling", { action: "spawn", task: siblingTask });
+    const { id } = await runTool("spawn-target", "spawn", { task: targetTask });
+    await runTool("spawn-sibling", "spawn", { task: siblingTask });
     await Promise.all([target.reached, sibling.reached]);
     await session.prompt(`/agents stop ${id}`);
     await session.waitForIdle();
-    const stopped = await runTool("target-result", { action: "result", id });
+    const stopped = await runTool("target-result", "result", { id });
     assert.equal(stopped.status, "stopped");
     sibling.release();
     await t.waitFor(

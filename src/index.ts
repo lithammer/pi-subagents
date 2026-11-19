@@ -1,11 +1,18 @@
 import {
   type ExtensionAPI,
   type ExtensionContext,
+  type ModelRegistry,
+  type ToolDefinition,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
-import { StringEnum } from "@earendil-works/pi-ai";
+import {
+  StringEnum,
+  type Api,
+  type Model,
+  type ModelThinkingLevel,
+} from "@earendil-works/pi-ai";
 import { Box, Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { Type, type TObject, type TProperties } from "typebox";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +26,34 @@ type Wake = {
   owner: Promise<Subagents>;
   completion: Completion;
 };
+
+function chooseSelection(
+  registry: ModelRegistry,
+  parent: { model?: Model<Api>; thinking: ModelThinkingLevel },
+  requested: { model?: string; thinking?: ModelThinkingLevel },
+) {
+  let model = parent.model;
+  if (requested.model !== undefined) {
+    // Split on the first slash: provider names have none, but model IDs can
+    // (accounts/fireworks/models/…).
+    const slash = requested.model.indexOf("/");
+    model =
+      slash > 0
+        ? registry.find(
+            requested.model.slice(0, slash),
+            requested.model.slice(slash + 1),
+          )
+        : undefined;
+    if (!model)
+      throw new Error(
+        `Unknown model "${requested.model}". Give the model as provider/id, for example anthropic/claude-sonnet-4-5.`,
+      );
+  }
+  if (!model)
+    throw new Error("Select a parent model before spawning a subagent.");
+
+  return { model, thinking: requested.thinking ?? parent.thinking };
+}
 
 function formatUsage(usage: Completion["usage"]) {
   if (!usage) return "";
@@ -124,7 +159,7 @@ export default function (pi: ExtensionAPI) {
 
   const showDeliveryFailure = (id: string, submission: number) => {
     showFailure(
-      `Subagent ${id} completion delivery failed for submission ${submission}. Retrieve the saved result with subagent result.`,
+      `Subagent ${id} completion delivery failed for submission ${submission}. Retrieve the saved result with subagent_result.`,
     );
   };
 
@@ -198,7 +233,7 @@ export default function (pi: ExtensionAPI) {
     message.content =
       `Subagent ${completion.id} (${completion.label}), submission ${completion.submission}: ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
       (preview.truncated
-        ? `\nUse subagent result with id ${completion.id} and submission ${completion.submission} for this full reply.`
+        ? `\nUse subagent_result with id ${completion.id} and submission ${completion.submission} for this full reply.`
         : "");
     message.display = true;
     message.details = completion;
@@ -275,199 +310,276 @@ export default function (pi: ExtensionAPI) {
     },
   );
 
-  pi.registerTool({
-    name: "subagent",
-    label: "Subagent",
-    executionMode: "sequential",
-    description:
-      "Run general-purpose background agents in separate conversations. " +
-      "Use only in trusted workspaces where children may run native tools with your OS permissions. " +
-      "Children share the parent's working directory. Their native read/bash/edit/write tools match the parent's active tool names and bypass parent permission hooks and custom tool overrides. " +
-      "Spawn returns immediately and completion arrives as a notification. Children take the parent's model, thinking level, and system prompt at spawn. " +
-      "Reuse an id with send to retain that selection and conversation. Children have no parent extensions, MCP, or nested delegation. " +
-      "Spawn and send return a submission number, also shown in completion notices. These are runtime-assigned IDs, not per-child sequence numbers; use the returned number rather than guessing. " +
-      "Result returns a reply by submission number, or the latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). " +
-      "Transcript shows a child's current activity and recent model and tool failures, with no raw diagnostic text. " +
-      "Status lists agents. Stop cancels outstanding work and keeps the conversation for another send. Children live only for this Pi session.",
-    promptSnippet:
-      "Delegate independent tasks to background agents; message existing agents to retain context",
-    promptGuidelines: [
-      "Use subagent for independent research, review, or implementation when delegation saves time or context; work on non-overlapping tasks locally while it runs. Do not duplicate a subagent's work.",
-      "Give subagent a self-contained task, file scope, expected evidence, and explicit permission to edit or research only. The child does not inherit the conversation history. For edits, assign non-overlapping write scopes to yourself and each subagent.",
-      "Verify subagent results before reporting success: check the evidence, inspect any edits, and run relevant checks rather than relying on the summary alone.",
-      "Use transcript to diagnose a stuck or failed child. Completion notifications arrive automatically, so do not poll for them. Use send for related follow-up work and stop to cancel a child explicitly.",
-      "When waiting for a subagent and no independent work remains, end your turn with a brief status message and no tool calls. Never use sleep, shell waits, or repeated tool calls to keep your turn open: completion notifications wait for the parent run to finish, then start another turn automatically.",
-    ],
-    parameters: Type.Object({
-      action: StringEnum([
-        "spawn",
-        "send",
-        "result",
-        "transcript",
-        "status",
-        "stop",
-      ] as const),
-      id: Type.Optional(
-        Type.String({
-          description:
-            "Existing agent id; required for send, result, transcript, and stop",
-        }),
-      ),
-      task: Type.Optional(
-        Type.String({
-          description:
-            "Self-contained task or follow-up message; required for spawn and send",
-        }),
-      ),
-      submission: Type.Optional(
-        Type.Integer({
-          description:
-            "For result: retrieve the exact reply using the submission number from spawn/send or its completion notice instead of the latest",
-        }),
-      ),
-      label: Type.Optional(
-        Type.String({
-          maxLength: 80,
-          description: "Short task label for a new agent",
-        }),
-      ),
-      delivery: Type.Optional(
-        StringEnum(["followUp", "steer"] as const, {
-          description:
-            "For send: queue after current work (default), or steer at the next turn boundary",
-        }),
-      ),
-    }),
-    async execute(toolCallId, args, signal, _onUpdate, ctx) {
-      signal?.throwIfAborted();
-      if (!session) throw new Error("The parent session has closed.");
+  const openAgents = async (ctx: ExtensionContext) => {
+    if (!session) throw new Error("The parent session has closed.");
+    runtime ??= Subagents.create(
+      ctx.modelRegistry,
+      refresh,
+      complete,
+      showFailure,
+    );
+    const agents = await runtime;
+    if (!session) throw new Error("The parent session has closed.");
+    return agents;
+  };
 
-      if (args.action === "status" && !runtime) {
-        return {
-          content: [{ type: "text", text: "No subagents." }],
-          details: undefined,
-        };
-      }
+  const registerAction = <Properties extends TProperties>(
+    action: string,
+    {
+      properties,
+      ...tool
+    }: Pick<
+      ToolDefinition,
+      "description" | "promptSnippet" | "promptGuidelines"
+    > & { properties: Properties },
+    run: (
+      open: () => Promise<Subagents>,
+      args: Parameters<ToolDefinition<TObject<Properties>>["execute"]>[1],
+      ctx: ExtensionContext,
+    ) => Promise<unknown>,
+  ) =>
+    pi.registerTool({
+      name: `subagent_${action}`,
+      label: `Subagent ${action}`,
+      executionMode: "sequential",
+      ...tool,
+      parameters: Type.Object(properties, { additionalProperties: false }),
+      async execute(toolCallId, args, signal, _onUpdate, ctx) {
+        signal?.throwIfAborted();
+        if (!session) throw new Error("The parent session has closed.");
 
-      runtime ??= Subagents.create(
-        ctx.modelRegistry,
-        refresh,
-        complete,
-        showFailure,
-      );
-      const agents = await runtime;
-      if (!session) throw new Error("The parent session has closed.");
+        let agents: Subagents | undefined;
+        const result = await run(
+          async () => (agents ??= await openAgents(ctx)),
+          args,
+          ctx,
+        );
 
-      let result: unknown;
-      switch (args.action) {
-        case "spawn": {
-          if (!args.task?.trim())
-            throw new Error("spawn requires a non-empty task.");
-          if (!ctx.model)
-            throw new Error(
-              "Select a parent model before spawning a subagent.",
-            );
-
-          result = await agents.spawn(
-            args.task,
-            args.label ?? args.task.slice(0, 60),
-            {
-              model: ctx.model,
-              thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
-              systemPrompt: ctx.getSystemPrompt(),
-              cwd: ctx.cwd,
-              tools: pi
-                .getActiveTools()
-                .filter((name) =>
-                  ["read", "bash", "edit", "write"].includes(name),
-                ),
-            },
-          );
-          break;
+        const text = JSON.stringify(result, null, 2);
+        const preview = truncateHead(text);
+        let output = preview.content;
+        if (preview.truncated) {
+          const directory = await mkdtemp(join(tmpdir(), "pi-durable-result-"));
+          const path = join(directory, "result.json");
+          await writeFile(path, text, { mode: 0o600 });
+          output += `\n[Truncated. Full JSON result: ${path}]`;
         }
-        case "send":
-          if (!args.id || !args.task?.trim())
-            throw new Error("send requires id and a non-empty task.");
-          result = await agents.send(
-            args.id,
-            args.task,
-            args.delivery === "steer" ? "steer" : "followUp",
-          );
-          break;
-        case "stop":
-          if (!args.id) throw new Error("stop requires id.");
-          result = await agents.stop(args.id);
-          break;
-        case "result":
-          if (!args.id) throw new Error("result requires id.");
-          result = await agents.result(args.id, args.submission);
-          break;
-        case "transcript":
-          if (!args.id) throw new Error("transcript requires id.");
-          result = await agents.transcript(args.id);
-          if (!result)
-            throw new Error("No subagent with that ID in this session.");
-          break;
-        case "status":
-          result = agents.list();
-          break;
-      }
 
-      const text = JSON.stringify(result, null, 2);
-      const preview = truncateHead(text);
-      let output = preview.content;
-      if (preview.truncated) {
-        const directory = await mkdtemp(join(tmpdir(), "pi-durable-result-"));
-        const path = join(directory, "result.json");
-        await writeFile(path, text, { mode: 0o600 });
-        output += `\n[Truncated. Full JSON result: ${path}]`;
-      }
-
-      const usage =
-        toolCallId && !signal?.aborted ? agents.takePendingUsage() : undefined;
-      return {
-        content: [{ type: "text", text: output }],
-        details: result,
-        ...(usage && { usage }),
-      };
-    },
-    renderCall(args, theme) {
-      return new Text(
-        theme.fg(
-          "toolTitle",
-          `subagent ${args.action ?? ""} ${args.id ?? args.label ?? ""}`,
-        ),
-        0,
-        0,
-      );
-    },
-    renderResult(result, { expanded }, theme) {
-      const value = result.details as
-        | { id?: string; status?: string; output?: string }
-        | unknown[]
-        | undefined;
-      if (expanded || !value) {
+        const usage =
+          agents && toolCallId && !signal?.aborted
+            ? agents.takePendingUsage()
+            : undefined;
+        return {
+          content: [{ type: "text", text: output }],
+          details: result,
+          ...(usage && { usage }),
+        };
+      },
+      renderCall(args, theme) {
+        const { id, label } = args as { id?: string; label?: string };
         return new Text(
-          result.content
-            .flatMap((part) => (part.type === "text" ? [part.text] : []))
-            .join("\n"),
+          theme.fg("toolTitle", `subagent ${action} ${id ?? label ?? ""}`),
           0,
           0,
         );
-      }
-      if (Array.isArray(value))
-        return new Text(`${value.length} subagents`, 0, 0);
+      },
+      renderResult(result, { expanded }, theme) {
+        const value = result.details as
+          | { id?: string; status?: string; output?: string }
+          | unknown[]
+          | undefined;
+        if (expanded || !value) {
+          return new Text(
+            result.content
+              .flatMap((part) => (part.type === "text" ? [part.text] : []))
+              .join("\n"),
+            0,
+            0,
+          );
+        }
+        if (Array.isArray(value))
+          return new Text(`${value.length} subagents`, 0, 0);
 
-      const summary = theme.fg(
-        "muted",
-        `${value.id ?? ""} · ${value.status ?? ""}`,
-      );
-      const preview = value.output
-        ? truncateHead(value.output, { maxLines: 4, maxBytes: 700 })
-        : undefined;
-      return new Text(summary + (preview ? `\n${preview.content}` : ""), 0, 0);
-    },
+        const summary = theme.fg(
+          "muted",
+          `${value.id ?? ""} · ${value.status ?? ""}`,
+        );
+        const preview = value.output
+          ? truncateHead(value.output, { maxLines: 4, maxBytes: 700 })
+          : undefined;
+        return new Text(
+          summary + (preview ? `\n${preview.content}` : ""),
+          0,
+          0,
+        );
+      },
+    });
+
+  const id = Type.String({ description: "Agent id from subagent_spawn" });
+  const task = Type.String({
+    pattern: "\\S",
+    description:
+      "Self-contained task: file scope, expected evidence, and whether the agent may edit",
   });
+  const submissionNote =
+    "Submission numbers are runtime-assigned IDs, not per-agent sequence numbers; use the returned number rather than guessing.";
+
+  registerAction(
+    "spawn",
+    {
+      description:
+        "Start a general-purpose background agent in a separate conversation. " +
+        "Use only in trusted workspaces where agents may run native tools with your OS permissions. " +
+        "Agents share the parent's working directory. Their native read/bash/edit/write tools match the parent's active tool names and bypass parent permission hooks and custom tool overrides. " +
+        "Agents take the parent's system prompt, and its model and thinking level unless model or thinking is given. They have no parent extensions, MCP, or nested delegation, and live only for this Pi session. " +
+        `Returns at once with the agent id and a submission number; completion arrives as a notification. ${submissionNote}`,
+      promptSnippet:
+        "Delegate an independent task to a background agent in a separate conversation",
+      promptGuidelines: [
+        "Use subagent_spawn for independent research, review, or implementation when delegation saves time or context; work on non-overlapping tasks locally while it runs. Do not duplicate a subagent's work.",
+        "Give subagent_spawn a self-contained task, file scope, expected evidence, and explicit permission to edit or research only. The agent does not inherit the conversation history. For edits, assign non-overlapping write scopes to yourself and each agent.",
+        "Verify subagent results before reporting success: check the evidence, inspect any edits, and run relevant checks rather than relying on the summary alone.",
+        "Completion notifications arrive automatically, so do not poll for them. Use subagent_send for related follow-up work to keep an agent's context, subagent_transcript to diagnose a stuck or failed agent, and subagent_stop to cancel one.",
+        "When waiting for a subagent and no independent work remains, end your turn with a brief status message and no tool calls. Never use sleep, shell waits, or repeated tool calls to keep your turn open: completion notifications wait for the parent run to finish, then start another turn automatically.",
+      ],
+      properties: {
+        task,
+        label: Type.Optional(
+          Type.String({
+            maxLength: 80,
+            description: "Short task label",
+          }),
+        ),
+        model: Type.Optional(
+          Type.String({
+            description:
+              "Model as provider/id, for example anthropic/claude-sonnet-4-5. Defaults to the parent's model",
+          }),
+        ),
+        thinking: Type.Optional(
+          Type.Unsafe<ModelThinkingLevel>(
+            StringEnum(
+              // pi-ai's MODEL_THINKING_LEVELS lives at a subpath that Pi's
+              // extension loader does not expose, so copy it and keep in step.
+              [
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+              ] as const satisfies readonly ModelThinkingLevel[],
+              {
+                description:
+                  "Thinking level the model supports. Defaults to the parent's level",
+              },
+            ),
+          ),
+        ),
+      },
+    },
+    async (open, args, ctx) =>
+      (await open()).spawn(args.task, args.label ?? args.task.slice(0, 60), {
+        ...chooseSelection(
+          ctx.modelRegistry,
+          {
+            model: ctx.model,
+            thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
+          },
+          args,
+        ),
+        systemPrompt: ctx.getSystemPrompt(),
+        cwd: ctx.cwd,
+        tools: pi
+          .getActiveTools()
+          .filter((name) => ["read", "bash", "edit", "write"].includes(name)),
+      }),
+  );
+
+  registerAction(
+    "send",
+    {
+      description:
+        "Send a follow-up task to an existing background agent. It keeps its model, thinking level, and conversation. " +
+        `Returns a submission number; completion arrives as a notification. ${submissionNote}`,
+      promptSnippet: "Message an existing background agent to keep its context",
+      properties: {
+        id,
+        task,
+        delivery: Type.Optional(
+          StringEnum(["followUp", "steer"] as const, {
+            description:
+              "Queue after current work (default), or steer at the next turn boundary",
+          }),
+        ),
+      },
+    },
+    async (open, args) =>
+      (await open()).send(
+        args.id,
+        args.task,
+        args.delivery === "steer" ? "steer" : "followUp",
+      ),
+  );
+
+  registerAction(
+    "result",
+    {
+      description:
+        "Return a background agent's reply by submission number, or its latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). " +
+        submissionNote,
+      promptSnippet: "Read a background agent's reply",
+      properties: {
+        id,
+        submission: Type.Optional(
+          Type.Integer({
+            description:
+              "Submission number from subagent_spawn, subagent_send, or a completion notice",
+          }),
+        ),
+      },
+    },
+    async (open, args) => (await open()).result(args.id, args.submission),
+  );
+
+  registerAction(
+    "transcript",
+    {
+      description:
+        "Show a background agent's current activity and recent model and tool failures, with no raw diagnostic text.",
+      promptSnippet: "Diagnose a stuck or failed background agent",
+      properties: { id },
+    },
+    async (open, args) => {
+      const transcript = await (await open()).transcript(args.id);
+      if (!transcript)
+        throw new Error("No subagent with that ID in this session.");
+      return transcript;
+    },
+  );
+
+  registerAction(
+    "status",
+    {
+      description:
+        "List background agents with their model, thinking level, status, and activity.",
+      promptSnippet: "List background agents",
+      properties: {},
+    },
+    async (open) => (runtime ? (await open()).list() : []),
+  );
+
+  registerAction(
+    "stop",
+    {
+      description:
+        "Cancel a background agent's outstanding work. It keeps its conversation for another subagent_send.",
+      promptSnippet: "Cancel a background agent's work",
+      properties: { id },
+    },
+    async (open, args) => (await open()).stop(args.id),
+  );
 
   pi.registerCommand("agents", {
     description:

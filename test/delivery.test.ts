@@ -69,10 +69,9 @@ for (const delivery of [undefined, "followUp"] as const) {
         firstTurn.release,
       );
 
-      const { id } = await runTool("spawn", { action: "spawn", task });
+      const { id } = await runTool("spawn", "spawn", { task });
       await firstTurn.reached;
-      await runTool("send", {
-        action: "send",
+      await runTool("send", "send", {
         id,
         task: nextTask,
         ...(delivery && { delivery }),

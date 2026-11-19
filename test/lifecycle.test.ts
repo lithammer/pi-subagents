@@ -56,10 +56,10 @@ for (const [action, name] of [
                 message.role === "toolResult" && message.toolCallId === id,
             );
           if (prompt === spawnPrompt && !usedTool("spawn")) {
-            return [toolCall("spawn", "subagent", { action: "spawn", task })];
+            return [toolCall("spawn", "subagent_spawn", { task })];
           }
           if (prompt === statusPrompt && !usedTool("status")) {
-            return [toolCall("status", "subagent", { action: "status" })];
+            return [toolCall("status", "subagent_status", {})];
           }
           return "Parent is idle.";
         },
