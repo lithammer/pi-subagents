@@ -15,7 +15,7 @@ in the background.
 
 ## Install and try
 
-Install with Pi 1.5.2 and Node.js 22.19 or newer.
+Install with Pi 1.6.0 and Node.js 22.19 or newer.
 
 ```sh
 pi install git:github.com/lithammer/pi-subagents
