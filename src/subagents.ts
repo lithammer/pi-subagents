@@ -7,6 +7,7 @@ import type {
   Usage,
 } from "@earendil-works/pi-ai";
 import {
+  cleanupSessionResources,
   isContextOverflow,
   isRetryableAssistantError,
 } from "@earendil-works/pi-ai";
@@ -21,6 +22,7 @@ import {
   Harness,
   LiveDoc,
   MemoryStorage,
+  ProviderDoc,
   SessionFailed,
   ToolResultEntry,
   UsageDoc,
@@ -311,17 +313,35 @@ export class Subagents {
     await Promise.all(
       [...this.children.values()].map((child) => child.watch.stop()),
     );
+    const providerSessions: string[] = [];
     try {
-      await this.harness.close(context);
-      await Promise.all(
-        [...this.children.values()].flatMap((child) => [...child.waits]),
-      );
+      for (const child of this.children.values()) {
+        const provider = await this.harness.snapshot(
+          ProviderDoc,
+          child.conversation.id,
+          context,
+        );
+        if (provider) providerSessions.push(provider.sessionId);
+      }
     } finally {
-      await Promise.all(
-        [...this.environments.values()].map((environment) =>
-          environment.cleanup(context),
-        ),
-      );
+      try {
+        await this.harness.close(context);
+        await Promise.all(
+          [...this.children.values()].flatMap((child) => [...child.waits]),
+        );
+      } finally {
+        // Providers such as openai-codex hold a socket per session, which
+        // keeps Pi from exiting. pi-durable cleans up through its own copy
+        // of pi-ai, which Pi does not share with extensions, so release the
+        // sessions through Pi's copy here.
+        for (const sessionId of providerSessions)
+          cleanupSessionResources(sessionId);
+        await Promise.all(
+          [...this.environments.values()].map((environment) =>
+            environment.cleanup(context),
+          ),
+        );
+      }
     }
   }
 
