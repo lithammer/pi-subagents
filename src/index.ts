@@ -103,6 +103,10 @@ function agentLine(agent: AgentSnapshot & { submission?: number }) {
   );
 }
 
+function agentRow(agent: AgentSnapshot) {
+  return `${agent.id} · ${agent.label} · ${agent.activity}`;
+}
+
 function completionHead(completion: Completion) {
   return `Subagent ${completion.id} (${completion.label}), submission ${completion.submission}: ${completion.status} in ${formatElapsed(completion.durationMs)}${formatUsage(completion.usage)}`;
 }
@@ -230,12 +234,7 @@ export default function (pi: ExtensionAPI) {
     }
     // Only the TUI takes a widget component.
     if (session.mode !== "tui") {
-      session.ui.setWidget(
-        "durable-subagents",
-        running.map(
-          (agent) => `${agent.id} · ${agent.label} · ${agent.activity}`,
-        ),
-      );
+      session.ui.setWidget("durable-subagents", running.map(agentRow));
       return;
     }
 
@@ -515,12 +514,7 @@ export default function (pi: ExtensionAPI) {
         }
         if (Array.isArray(value))
           return new Text(
-            (value.length
-              ? value.map(
-                  (agent) => `${agent.id} · ${agent.label} · ${agent.activity}`,
-                )
-              : ["No subagents."]
-            )
+            (value.length ? value.map(agentRow) : ["No subagents."])
               .map((line) => theme.fg("muted", line))
               .join("\n"),
             0,
@@ -722,25 +716,62 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("agents", {
     description:
       "List, stop, or inspect a background agent's failure transcript",
+    getArgumentCompletions: async (prefix) => {
+      const [action, id, ...rest] = prefix.trimStart().split(/\s+/);
+      const actions = ["stop", "transcript"];
+      const agents = runtime ? (await runtime).list() : [];
+      const items =
+        id === undefined
+          ? actions
+              .filter((name) => name.startsWith(action))
+              .map((name) => ({ value: `${name} `, label: name }))
+          : rest.length || !actions.includes(action)
+            ? []
+            : agents
+                .filter((agent) => agent.id.startsWith(id))
+                .map((agent) => ({
+                  value: `${action} ${agent.id}`,
+                  label: agent.id,
+                  description: `${agent.label} · ${agent.activity}`,
+                }));
+      return items.length ? items : null;
+    },
     handler: async (args, ctx) => {
       const agents = runtime ? await runtime : undefined;
-      const rows = () => agents?.list() ?? [];
+      const list = () => agents?.list() ?? [];
       const showList = () =>
         ctx.ui.notify(
-          rows()
-            .map((agent) => `${agent.id} · ${agent.label} · ${agent.activity}`)
-            .join("\n") || "No subagents.",
+          list().map(agentRow).join("\n") || "No subagents.",
           "info",
         );
 
-      const [action, id] = args.trim().split(/\s+/);
+      const [action, given] = args.trim().split(/\s+/);
       if (!action) return showList();
-      if ((action !== "stop" && action !== "transcript") || !id)
+      if (action !== "stop" && action !== "transcript")
         return ctx.ui.notify(
-          "Usage: /agents, /agents stop <id>, or /agents transcript <id>",
+          "Usage: /agents, /agents stop [id], or /agents transcript [id]",
           "warning",
         );
-      if (!agents || !rows().some((agent) => agent.id === id))
+
+      let id: string | undefined = given;
+      if (!id) {
+        const stopping = action === "stop";
+        const choices = stopping
+          ? list().filter((agent) => agent.pending > 0)
+          : list();
+        if (!choices.length)
+          return ctx.ui.notify(
+            stopping ? "No running subagents." : "No subagents.",
+            "info",
+          );
+        const choice = await ctx.ui.select(
+          stopping ? "Stop which subagent?" : "Inspect which subagent?",
+          choices.map(agentRow),
+        );
+        id = choices.find((agent) => agentRow(agent) === choice)?.id;
+        if (!id) return;
+      }
+      if (!agents || !list().some((agent) => agent.id === id))
         return ctx.ui.notify(`No subagent ${id} in this session.`, "warning");
 
       if (action === "transcript") {
