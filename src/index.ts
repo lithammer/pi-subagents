@@ -61,9 +61,27 @@ function oneLine(text: string, width = 60) {
   return `${space > width / 2 ? cut.slice(0, space) : cut}…`;
 }
 
+const compact = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+function formatCost(cost: number) {
+  return `$${cost.toFixed(cost > 0 && cost < 0.01 ? 4 : 2)}`;
+}
+
+// Usage is the agent's running total, not the spend of one submission.
 function formatUsage(usage: Completion["usage"]) {
   if (!usage) return "";
-  return `\nTokens: ${usage.input} input, ${usage.output} output, ${usage.cacheRead} cache read, ${usage.cacheWrite} cache write · $${usage.cost.toFixed(6)}`;
+  const tokens =
+    usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  if (tokens === 0 && usage.cost === 0) return "";
+  return ` · agent total ${compact.format(tokens)} tokens, ${formatCost(usage.cost)}`;
+}
+
+function formatUsageBreakdown(usage: Completion["usage"]) {
+  if (!usage) return "";
+  return `\nAgent total: ${compact.format(usage.input)} input · ${compact.format(usage.output)} output · ${compact.format(usage.cacheRead)} cache read · ${compact.format(usage.cacheWrite)} cache write · ${formatCost(usage.cost)}`;
 }
 
 type Reply = Awaited<ReturnType<Subagents["result"]>>;
@@ -319,19 +337,28 @@ export default function (pi: ExtensionAPI) {
     completionType,
     (message, { expanded, outputPad }, theme) => {
       const completion = message.details as Completion;
-      const color = completion.status === "completed" ? "success" : "warning";
+      const [mark, color] = (
+        {
+          completed: ["✓", "success"],
+          stopped: ["■", "warning"],
+          failed: ["✗", "error"],
+        } as const
+      )[completion.status];
       const title = theme.fg(
         color,
-        `${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}`,
+        `${mark} ${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}`,
       );
+      const usage = expanded
+        ? formatUsageBreakdown(completion.usage)
+        : formatUsage(completion.usage);
       const card = new Box(outputPad, 1, (text) =>
         theme.bg("customMessageBg", text),
       );
       card.addChild(
         new Text(
-          expanded
-            ? `${title}${formatUsage(completion.usage)}\n${completion.output}`
-            : title,
+          title +
+            theme.fg("muted", usage) +
+            (expanded ? `\n${completion.output}` : ""),
           0,
           0,
         ),
