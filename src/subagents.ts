@@ -50,6 +50,8 @@ export type AgentSnapshot = {
   thinking: ModelThinkingLevel;
   status: "running" | "idle" | "stopped" | "failed";
   pending: number;
+  /** Epoch milliseconds; set while work is pending. */
+  runningSince?: number;
   activity: string;
 };
 
@@ -59,6 +61,7 @@ export type Completion = {
   submission: number;
   status: "completed" | "stopped" | "failed";
   output: string;
+  durationMs: number;
   usage?: UsageSummary;
 };
 
@@ -371,6 +374,7 @@ export class Subagents {
   ) {
     this.assertOpen();
     child.state.pending++;
+    child.state.runningSince ??= Date.now();
     child.state.status = "running";
     child.liveActivity = undefined;
     this.changed();
@@ -384,6 +388,7 @@ export class Subagents {
     } catch (error) {
       child.state.pending--;
       child.state.status = child.state.pending ? "running" : "failed";
+      if (!child.state.pending) delete child.state.runningSince;
       this.changed();
       throw error;
     }
@@ -403,7 +408,8 @@ export class Subagents {
   }
 
   private async settle(child: Child, submission: Submission) {
-    let completion: Completion;
+    const started = Date.now();
+    let outcome: Pick<Completion, "status" | "output">;
     let newReply = true;
     try {
       const settled = await submission.wait(context);
@@ -422,35 +428,29 @@ export class Subagents {
                 : [],
             )
             .join("\n") ?? "";
-        completion = {
-          id: child.state.id,
-          label: child.state.label,
-          submission: submission.id,
-          status: "completed",
-          output,
-        };
+        outcome = { status: "completed", output };
         newReply = child.answer !== settled.answer;
         child.answer = settled.answer;
       } else {
-        const stopped = settled.reason === "aborted";
-        completion = {
-          id: child.state.id,
-          label: child.state.label,
-          submission: submission.id,
-          status: stopped ? "stopped" : "failed",
+        outcome = {
+          status: settled.reason === "aborted" ? "stopped" : "failed",
           // Pi saves completion notices and tool results in the parent session.
           output: settled.reason ?? settled.status,
         };
       }
     } catch {
-      completion = {
-        id: child.state.id,
-        label: child.state.label,
-        submission: submission.id,
+      outcome = {
         status: "failed",
         output: "Could not read the child submission.",
       };
     }
+    const completion: Completion = {
+      id: child.state.id,
+      label: child.state.label,
+      submission: submission.id,
+      durationMs: Date.now() - started,
+      ...outcome,
+    };
 
     child.state.pending--;
     child.state.status = child.state.pending
@@ -458,6 +458,7 @@ export class Subagents {
       : completion.status === "completed"
         ? "idle"
         : completion.status;
+    if (!child.state.pending) delete child.state.runningSince;
     if (!this.closed) {
       try {
         const ledger = await this.harness.snapshot(

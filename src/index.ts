@@ -11,7 +11,7 @@ import {
   type Model,
   type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TObject, type TProperties } from "typebox";
 import { Subagents, type AgentSnapshot, type Completion } from "./subagents.ts";
 
@@ -61,6 +61,15 @@ function oneLine(text: string, width = 60) {
   return `${space > width / 2 ? cut.slice(0, space) : cut}…`;
 }
 
+function formatElapsed(ms: number) {
+  const seconds = Math.round(ms / 1_000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600)
+    return `${Math.floor(seconds / 60)}m${pad(seconds % 60)}s`;
+  return `${Math.floor(seconds / 3_600)}h${pad(Math.floor((seconds % 3_600) / 60))}m`;
+}
+
 const compact = new Intl.NumberFormat("en", {
   notation: "compact",
   maximumFractionDigits: 1,
@@ -95,7 +104,7 @@ function agentLine(agent: AgentSnapshot & { submission?: number }) {
 }
 
 function completionHead(completion: Completion) {
-  return `Subagent ${completion.id} (${completion.label}), submission ${completion.submission}: ${completion.status}${formatUsage(completion.usage)}`;
+  return `Subagent ${completion.id} (${completion.label}), submission ${completion.submission}: ${completion.status} in ${formatElapsed(completion.durationMs)}${formatUsage(completion.usage)}`;
 }
 
 function replyText(reply: Reply) {
@@ -215,14 +224,44 @@ export default function (pi: ExtensionAPI) {
     if (!session?.hasUI) return;
 
     const running = agents.filter((agent) => agent.pending > 0);
-    session.ui.setWidget(
-      "durable-subagents",
-      running.length
-        ? running.map(
-            (agent) => `${agent.id} · ${agent.label} · ${agent.activity}`,
-          )
-        : undefined,
-    );
+    if (!running.length) {
+      session.ui.setWidget("durable-subagents", undefined);
+      return;
+    }
+    // Only the TUI takes a widget component.
+    if (session.mode !== "tui") {
+      session.ui.setWidget(
+        "durable-subagents",
+        running.map(
+          (agent) => `${agent.id} · ${agent.label} · ${agent.activity}`,
+        ),
+      );
+      return;
+    }
+
+    const shown = running.slice(0, 8);
+    session.ui.setWidget("durable-subagents", (tui, theme) => {
+      const clock = setInterval(() => tui.requestRender(), 1_000);
+      clock.unref();
+      return {
+        render: (width) =>
+          [
+            ...shown.map(
+              (agent) =>
+                `${theme.fg("accent", "●")} ${agent.label}` +
+                theme.fg(
+                  "muted",
+                  ` · ${agent.activity} · ${formatElapsed(Date.now() - (agent.runningSince ?? Date.now()))} · ${agent.model.split("/").at(-1)} · ${agent.id}`,
+                ),
+            ),
+            ...(running.length > shown.length
+              ? [theme.fg("muted", `… ${running.length - shown.length} more`)]
+              : []),
+          ].map((line) => truncateToWidth(` ${line}`, width, "…")),
+        invalidate() {},
+        dispose: () => clearInterval(clock),
+      };
+    });
   };
 
   const complete = (completion: Completion) =>
@@ -336,7 +375,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer(
     completionType,
     (message, { expanded, outputPad }, theme) => {
-      const completion = message.details as Completion;
+      // Cards saved before durations were recorded lack one.
+      const completion = message.details as Omit<Completion, "durationMs"> &
+        Partial<Pick<Completion, "durationMs">>;
       const [mark, color] = (
         {
           completed: ["✓", "success"],
@@ -346,7 +387,10 @@ export default function (pi: ExtensionAPI) {
       )[completion.status];
       const title = theme.fg(
         color,
-        `${mark} ${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}`,
+        `${mark} ${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}` +
+          (completion.durationMs === undefined
+            ? ""
+            : ` · ${formatElapsed(completion.durationMs)}`),
       );
       const usage = theme.fg(
         "muted",
