@@ -126,7 +126,7 @@ export default function (pi: ExtensionAPI) {
   let session: ExtensionContext | undefined;
   let treeMove:
     { from: string | null; to: string | null } | "detached" | undefined;
-  const awaitingDelivery = new Map<number, string>();
+  const awaitingDelivery = new Set<Completion>();
   const wakes = new WeakMap<object, Wake>();
 
   pi.on("session_start", (_event, ctx) => {
@@ -269,7 +269,7 @@ export default function (pi: ExtensionAPI) {
 
       const token = {};
       wakes.set(token, { owner: runtime, completion });
-      if (!idle) awaitingDelivery.set(completion.submission, completion.id);
+      if (!idle) awaitingDelivery.add(completion);
       try {
         // Pi can hold a wake through a tree move while agent_settled runs.
         pi.sendMessage(
@@ -282,7 +282,7 @@ export default function (pi: ExtensionAPI) {
           { triggerTurn: true, deliverAs: "followUp" },
         );
       } catch {
-        awaitingDelivery.delete(completion.submission);
+        awaitingDelivery.delete(completion);
         showDeliveryFailure(completion.id, completion.submission);
       }
     });
@@ -323,7 +323,7 @@ export default function (pi: ExtensionAPI) {
         : "");
     message.display = true;
     message.details = completion;
-    awaitingDelivery.delete(completion.submission);
+    awaitingDelivery.delete(completion);
   });
 
   pi.on("context", ({ messages }) => {
@@ -337,7 +337,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", ({ aborted }) => {
     // Escape can drop queued follow-ups before Pi shows them.
     if (aborted) {
-      for (const [submission, id] of awaitingDelivery)
+      for (const { id, submission } of awaitingDelivery)
         showDeliveryFailure(id, submission);
     }
     awaitingDelivery.clear();
@@ -548,9 +548,6 @@ export default function (pi: ExtensionAPI) {
     description:
       "Self-contained task: file scope, expected evidence, and whether the agent may edit",
   });
-  const submissionNote =
-    "Submission numbers are runtime-assigned IDs, not per-agent sequence numbers; use the returned number rather than guessing.";
-
   registerAction(
     "spawn",
     {
@@ -559,7 +556,7 @@ export default function (pi: ExtensionAPI) {
         "Use only in trusted workspaces where agents may run native tools with your OS permissions. " +
         "Agents share the parent's working directory. Their native read/bash/edit/write tools match the parent's active tool names and bypass parent permission hooks and custom tool overrides. " +
         "Agents take the parent's system prompt, and its model and thinking level unless model or thinking is given. They have no parent extensions, MCP, or nested delegation, and live only for this Pi session. " +
-        `Returns at once with the agent id and a submission number; completion arrives as a notification. ${submissionNote}`,
+        "Returns at once with the agent id and a submission number, counted per agent from 1; completion arrives as a notification.",
       promptSnippet:
         "Delegate an independent task to a background agent in a separate conversation",
       promptGuidelines: [
@@ -634,7 +631,7 @@ export default function (pi: ExtensionAPI) {
     {
       description:
         "Send a follow-up task to an existing background agent. It keeps its model, thinking level, and conversation. " +
-        `Returns a submission number; completion arrives as a notification. ${submissionNote}`,
+        "Returns a submission number; completion arrives as a notification.",
       promptSnippet: "Message an existing background agent to keep its context",
       properties: {
         id,
@@ -660,8 +657,7 @@ export default function (pi: ExtensionAPI) {
     "result",
     {
       description:
-        "Return a background agent's reply by submission number, or its latest if omitted (up to 50 KB/2,000 lines, with a path for overflow). " +
-        submissionNote,
+        "Return a background agent's reply by submission number, or its latest if omitted (up to 50 KB/2,000 lines, with a path for overflow).",
       promptSnippet: "Read a background agent's reply",
       properties: {
         id,

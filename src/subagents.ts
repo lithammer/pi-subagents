@@ -86,6 +86,7 @@ type Child = {
   conversation: Conversation;
   watch: ConversationWatch;
   waits: Set<Promise<void>>;
+  submissions: number;
   replies: Map<number, Completion>;
   accountedUsage: UsageState["models"];
   answer?: number;
@@ -190,6 +191,7 @@ export class Subagents {
       conversation,
       watch,
       waits: new Set(),
+      submissions: 0,
       replies: new Map(),
       accountedUsage: {},
     };
@@ -397,21 +399,24 @@ export class Subagents {
       throw error;
     }
 
-    const wait = this.settle(child, submission);
+    // Number each agent's submissions from one, so the parent need not track
+    // the harness's shared IDs.
+    const number = ++child.submissions;
+    const wait = this.settle(child, submission, number);
     child.waits.add(wait);
     void wait.then(
       () => child.waits.delete(wait),
       () => {
         child.waits.delete(wait);
         this.reportFailure(
-          `Subagent ${child.state.id} could not finish handling submission ${submission.id}.`,
+          `Subagent ${child.state.id} could not finish handling submission ${number}.`,
         );
       },
     );
-    return submission.id;
+    return number;
   }
 
-  private async settle(child: Child, submission: Submission) {
+  private async settle(child: Child, submission: Submission, number: number) {
     const started = Date.now();
     let outcome: Pick<Completion, "status" | "output">;
     let newReply = true;
@@ -457,7 +462,7 @@ export class Subagents {
     const completion: Completion = {
       id: child.state.id,
       label: child.state.label,
-      submission: submission.id,
+      submission: number,
       durationMs: Date.now() - started,
       ...outcome,
     };
@@ -486,7 +491,7 @@ export class Subagents {
           );
       }
     }
-    child.replies.set(submission.id, completion);
+    child.replies.set(number, completion);
     this.changed();
     // The caller of stop() already has the stopped state; a notice would
     // start a parent turn to repeat it.
