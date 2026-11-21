@@ -228,20 +228,9 @@ export class Subagents {
   async transcript(id: string) {
     const child = this.child(id);
 
-    const limit = 20;
-    const failures: string[] = [];
-    let cursor: Cursor | undefined;
-    do {
-      const page = await child.conversation.entries({}, 100, cursor, context);
-      this.assertOpen();
-      for (const entry of page.items) {
-        const failure = describeFailure(entry);
-        if (failure) failures.push(`#${entry.id} · ${failure}`);
-        if (failures.length === limit) break;
-      }
-      cursor = page.next;
-    } while (cursor && failures.length < limit);
-
+    const failures = (await this.failures(child))
+      .slice(-20)
+      .map(({ entry, failure }) => `#${entry} · ${failure}`);
     const { model, status, pending, activity } = snapshot(child);
     return {
       id,
@@ -254,6 +243,21 @@ export class Subagents {
           : ["No model or tool failures recorded."]),
       ].join("\n"),
     };
+  }
+
+  private async failures(child: Child) {
+    const failures: { entry: number; failure: string }[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await child.conversation.entries({}, 100, cursor, context);
+      this.assertOpen();
+      for (const entry of page.items) {
+        const failure = describeFailure(entry);
+        if (failure) failures.push({ entry: entry.id, failure });
+      }
+      cursor = page.next;
+    } while (cursor);
+    return failures;
   }
 
   takePendingUsage() {
@@ -432,10 +436,16 @@ export class Subagents {
         newReply = child.answer !== settled.answer;
         child.answer = settled.answer;
       } else {
+        const stopped = settled.reason === "aborted";
+        const cause = stopped
+          ? undefined
+          : (await this.failures(child)).at(-1)?.failure;
         outcome = {
-          status: settled.reason === "aborted" ? "stopped" : "failed",
-          // Pi saves completion notices and tool results in the parent session.
-          output: settled.reason ?? settled.status,
+          status: stopped ? "stopped" : "failed",
+          // Pi saves completion notices and tool results in the parent
+          // session, so name the cause only in describeFailure's known words.
+          output:
+            (settled.reason ?? settled.status) + (cause ? `: ${cause}` : ""),
         };
       }
     } catch {
