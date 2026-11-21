@@ -477,7 +477,10 @@ export class Subagents {
     }
     child.replies.set(submission.id, completion);
     this.changed();
-    if (!this.closed && newReply) this.onComplete(completion);
+    // The caller of stop() already has the stopped state; a notice would
+    // start a parent turn to repeat it.
+    if (!this.closed && newReply && completion.status !== "stopped")
+      this.onComplete(completion);
   }
 
   private reportRuntimeFailure(report: Report) {
