@@ -55,6 +55,15 @@ function chooseSelection(
   return { model, thinking: requested.thinking ?? parent.thinking };
 }
 
+function oneLine(text: string, width = 60) {
+  const line = text.trim().split("\n", 1)[0].replace(/\s+/g, " ");
+  if (line.length <= width) return line;
+
+  const cut = line.slice(0, width);
+  const space = cut.lastIndexOf(" ");
+  return `${space > width / 2 ? cut.slice(0, space) : cut}…`;
+}
+
 function formatUsage(usage: Completion["usage"]) {
   if (!usage) return "";
   return `\nTokens: ${usage.input} input, ${usage.output} output, ${usage.cacheRead} cache read, ${usage.cacheWrite} cache write · $${usage.cost.toFixed(6)}`;
@@ -480,21 +489,25 @@ export default function (pi: ExtensionAPI) {
       },
     },
     async (open, args, ctx) =>
-      (await open()).spawn(args.task, args.label ?? args.task.slice(0, 60), {
-        ...chooseSelection(
-          ctx.modelRegistry,
-          {
-            model: ctx.model,
-            thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
-          },
-          args,
-        ),
-        systemPrompt: ctx.getSystemPrompt(),
-        cwd: ctx.cwd,
-        tools: pi
-          .getActiveTools()
-          .filter((name) => ["read", "bash", "edit", "write"].includes(name)),
-      }),
+      (await open()).spawn(
+        args.task,
+        oneLine(args.label ?? "", 80) || oneLine(args.task),
+        {
+          ...chooseSelection(
+            ctx.modelRegistry,
+            {
+              model: ctx.model,
+              thinking: ctx.thinkingLevel ?? pi.getThinkingLevel(),
+            },
+            args,
+          ),
+          systemPrompt: ctx.getSystemPrompt(),
+          cwd: ctx.cwd,
+          tools: pi
+            .getActiveTools()
+            .filter((name) => ["read", "bash", "edit", "write"].includes(name)),
+        },
+      ),
   );
 
   registerAction(
