@@ -81,7 +81,7 @@ function formatUsage(usage: Completion["usage"]) {
 
 function formatUsageBreakdown(usage: Completion["usage"]) {
   if (!usage) return "";
-  return `\nAgent total: ${compact.format(usage.input)} input · ${compact.format(usage.output)} output · ${compact.format(usage.cacheRead)} cache read · ${compact.format(usage.cacheWrite)} cache write · ${formatCost(usage.cost)}`;
+  return `Agent total: ${compact.format(usage.input)} input · ${compact.format(usage.output)} output · ${compact.format(usage.cacheRead)} cache read · ${compact.format(usage.cacheWrite)} cache write · ${formatCost(usage.cost)}`;
 }
 
 type Reply = Awaited<ReturnType<Subagents["result"]>>;
@@ -348,17 +348,20 @@ export default function (pi: ExtensionAPI) {
         color,
         `${mark} ${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}`,
       );
-      const usage = expanded
-        ? formatUsageBreakdown(completion.usage)
-        : formatUsage(completion.usage);
+      const usage = theme.fg(
+        "muted",
+        expanded
+          ? formatUsageBreakdown(completion.usage)
+          : formatUsage(completion.usage),
+      );
       const card = new Box(outputPad, 1, (text) =>
         theme.bg("customMessageBg", text),
       );
       card.addChild(
         new Text(
-          title +
-            theme.fg("muted", usage) +
-            (expanded ? `\n${completion.output}` : ""),
+          expanded
+            ? [title, ...(usage ? [usage] : []), completion.output].join("\n")
+            : title + usage,
           0,
           0,
         ),
@@ -424,17 +427,38 @@ export default function (pi: ExtensionAPI) {
         };
       },
       renderCall(args, theme) {
-        const { id, label } = args as { id?: string; label?: string };
+        const call = args as {
+          id?: string;
+          label?: string;
+          task?: string;
+          model?: string;
+          thinking?: string;
+          submission?: number;
+          delivery?: string;
+        };
+        const task = oneLine(call.task ?? "");
+        const subject = call.id ?? (oneLine(call.label ?? "", 80) || task);
+        const selection = [call.model, call.thinking].filter(Boolean);
+        const notes = [
+          call.id && task && `↳ ${task}`,
+          selection.length && `(${selection.join(", ")})`,
+          call.submission !== undefined && `submission ${call.submission}`,
+          call.delivery === "steer" && "(steer)",
+        ].filter(Boolean);
         return new Text(
-          theme.fg("toolTitle", `subagent ${action} ${id ?? label ?? ""}`),
+          [
+            theme.fg("toolTitle", theme.bold(`subagent ${action}`)),
+            ...(subject ? [theme.fg("accent", subject)] : []),
+            ...(notes.length ? [theme.fg("muted", notes.join(" "))] : []),
+          ].join(" "),
           0,
           0,
         );
       },
       renderResult(result, { expanded }, theme) {
         const value = result.details as
-          | { id?: string; status?: string; output?: string }
-          | unknown[]
+          | (Partial<AgentSnapshot> & { submission?: number; output?: string })
+          | AgentSnapshot[]
           | undefined;
         if (expanded || !value) {
           return new Text(
@@ -446,11 +470,28 @@ export default function (pi: ExtensionAPI) {
           );
         }
         if (Array.isArray(value))
-          return new Text(`${value.length} subagents`, 0, 0);
+          return new Text(
+            (value.length
+              ? value.map(
+                  (agent) => `${agent.id} · ${agent.label} · ${agent.activity}`,
+                )
+              : ["No subagents."]
+            )
+              .map((line) => theme.fg("muted", line))
+              .join("\n"),
+            0,
+            0,
+          );
 
         const summary = theme.fg(
           "muted",
-          `${value.id ?? ""} · ${value.status ?? ""}`,
+          [
+            value.id,
+            value.activity ?? value.status,
+            value.submission !== undefined && `submission ${value.submission}`,
+          ]
+            .filter(Boolean)
+            .join(" · "),
         );
         const preview = value.output
           ? truncateHead(value.output, { maxLines: 4, maxBytes: 700 })
