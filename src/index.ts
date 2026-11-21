@@ -563,7 +563,7 @@ export default function (pi: ExtensionAPI) {
         "Use subagent_spawn for independent research, review, or implementation when delegation saves time or context; work on non-overlapping tasks locally while it runs. Do not duplicate a subagent's work.",
         "Give subagent_spawn a self-contained task, file scope, expected evidence, and explicit permission to edit or research only. The agent does not inherit the conversation history. For edits, assign non-overlapping write scopes to yourself and each agent.",
         "Verify subagent results before reporting success: check the evidence, inspect any edits, and run relevant checks rather than relying on the summary alone.",
-        "Completion notifications arrive automatically, so do not poll for them. Use subagent_send for related follow-up work to keep an agent's context, subagent_transcript to diagnose a stuck or failed agent, and subagent_stop to cancel one.",
+        "Completion notifications arrive automatically, so do not poll for them. Use subagent_send for related follow-up work to keep an agent's context, subagent_diagnose to inspect a stuck or failed agent, and subagent_stop to cancel one.",
         "When waiting for a subagent and no independent work remains, end your turn with a brief status message and no tool calls. Never use sleep, shell waits, or repeated tool calls to keep your turn open: completion notifications wait for the parent run to finish, then start another turn automatically.",
       ],
       properties: {
@@ -674,15 +674,15 @@ export default function (pi: ExtensionAPI) {
   );
 
   registerAction(
-    "transcript",
+    "diagnose",
     {
       description:
         "Show a background agent's current activity and recent model and tool failures, with no raw diagnostic text.",
       promptSnippet: "Diagnose a stuck or failed background agent",
       properties: { id },
     },
-    async (open, args) => (await open()).transcript(args.id),
-    (transcript) => transcript.output,
+    async (open, args) => (await open()).diagnose(args.id),
+    (diagnosis) => diagnosis.output,
   );
 
   registerAction(
@@ -710,11 +710,10 @@ export default function (pi: ExtensionAPI) {
   );
 
   pi.registerCommand("agents", {
-    description:
-      "List, stop, or inspect a background agent's failure transcript",
+    description: "List, stop, or diagnose background agents",
     getArgumentCompletions: async (prefix) => {
       const [action, id, ...rest] = prefix.trimStart().split(/\s+/);
-      const actions = ["stop", "transcript"];
+      const actions = ["stop", "diagnose"];
       const agents = runtime ? (await runtime).list() : [];
       const items =
         id === undefined
@@ -743,9 +742,9 @@ export default function (pi: ExtensionAPI) {
 
       const [action, given] = args.trim().split(/\s+/);
       if (!action) return showList();
-      if (action !== "stop" && action !== "transcript")
+      if (action !== "stop" && action !== "diagnose")
         return ctx.ui.notify(
-          "Usage: /agents, /agents stop [id], or /agents transcript [id]",
+          "Usage: /agents, /agents stop [id], or /agents diagnose [id]",
           "warning",
         );
 
@@ -770,8 +769,8 @@ export default function (pi: ExtensionAPI) {
       if (!agents || !list().some((agent) => agent.id === id))
         return ctx.ui.notify(`No subagent ${id} in this session.`, "warning");
 
-      if (action === "transcript") {
-        ctx.ui.notify((await agents.transcript(id)).output, "info");
+      if (action === "diagnose") {
+        ctx.ui.notify((await agents.diagnose(id)).output, "info");
         return;
       }
       await agents.stop(id);

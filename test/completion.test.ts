@@ -400,7 +400,7 @@ test(
 );
 
 test(
-  "child transcript keeps provider credentials out of the parent session",
+  "a diagnosis keeps provider credentials out of the parent session",
   { timeout: 15_000 },
   async (t) => {
     const task = "Make a request the provider will reject.";
@@ -411,13 +411,13 @@ test(
 
     const { id } = await runTool("spawn", "spawn", { task });
     await waitForCompletion(t, session, 1);
-    const transcript = await runTool("transcript", "transcript", { id });
+    const diagnosis = await runTool("diagnose", "diagnose", { id });
 
     assert.ok(
       !JSON.stringify(session.sessionManager.getEntries()).includes(credential),
       "Parent session entries must omit the provider credential",
     );
-    assert.match(transcript.output, /model request failed \(HTTP 401\)/);
+    assert.match(diagnosis.output, /model request failed \(HTTP 401\)/);
   },
 );
 

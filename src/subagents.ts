@@ -227,7 +227,7 @@ export class Subagents {
     return Array.from(this.children.values(), snapshot);
   }
 
-  async transcript(id: string) {
+  async diagnose(id: string) {
     const child = this.child(id);
 
     const failures = (await this.failures(child))

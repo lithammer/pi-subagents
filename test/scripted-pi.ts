@@ -147,7 +147,7 @@ export async function openScriptedRuntime(
         sessionStartEvent,
         model,
         tools: [
-          ...["spawn", "send", "result", "transcript", "status", "stop"].map(
+          ...["spawn", "send", "result", "diagnose", "status", "stop"].map(
             (action) => `subagent_${action}`,
           ),
           "read",
