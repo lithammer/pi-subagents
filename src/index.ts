@@ -13,9 +13,6 @@ import {
 } from "@earendil-works/pi-ai";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { Type, type TObject, type TProperties } from "typebox";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Subagents, type AgentSnapshot, type Completion } from "./subagents.ts";
 
 const completionType = "durable-subagent-completion";
@@ -67,6 +64,30 @@ function oneLine(text: string, width = 60) {
 function formatUsage(usage: Completion["usage"]) {
   if (!usage) return "";
   return `\nTokens: ${usage.input} input, ${usage.output} output, ${usage.cacheRead} cache read, ${usage.cacheWrite} cache write · $${usage.cost.toFixed(6)}`;
+}
+
+type Reply = Awaited<ReturnType<Subagents["result"]>>;
+
+function agentLine(agent: AgentSnapshot & { submission?: number }) {
+  return (
+    `${agent.id} · ${agent.label} · ${agent.model} (thinking: ${agent.thinking}) · ${agent.activity}` +
+    (agent.pending > 1 ? ` · ${agent.pending} pending` : "") +
+    (agent.submission === undefined ? "" : ` · submission ${agent.submission}`)
+  );
+}
+
+function completionHead(completion: Completion) {
+  return `Subagent ${completion.id} (${completion.label}), submission ${completion.submission}: ${completion.status}${formatUsage(completion.usage)}`;
+}
+
+function replyText(reply: Reply) {
+  if (!("submission" in reply)) return `${agentLine(reply)}\n${reply.output}`;
+  return (
+    `${completionHead(reply)}\n${reply.output}` +
+    ("fullOutputPath" in reply
+      ? `\n[Truncated. Full reply: ${reply.fullOutputPath}]`
+      : "")
+  );
 }
 
 export default function (pi: ExtensionAPI) {
@@ -240,7 +261,7 @@ export default function (pi: ExtensionAPI) {
     });
     message.customType = completionType;
     message.content =
-      `Subagent ${completion.id} (${completion.label}), submission ${completion.submission}: ${completion.status}${formatUsage(completion.usage)}\n${preview.content}` +
+      `${completionHead(completion)}\n${preview.content}` +
       (preview.truncated
         ? `\nUse subagent_result with id ${completion.id} and submission ${completion.submission} for this full reply.`
         : "");
@@ -332,7 +353,7 @@ export default function (pi: ExtensionAPI) {
     return agents;
   };
 
-  const registerAction = <Properties extends TProperties>(
+  const registerAction = <Properties extends TProperties, Result>(
     action: string,
     {
       properties,
@@ -345,7 +366,8 @@ export default function (pi: ExtensionAPI) {
       open: () => Promise<Subagents>,
       args: Parameters<ToolDefinition<TObject<Properties>>["execute"]>[1],
       ctx: ExtensionContext,
-    ) => Promise<unknown>,
+    ) => Promise<Result>,
+    text: (result: Result) => string,
   ) =>
     pi.registerTool({
       name: `subagent_${action}`,
@@ -364,22 +386,12 @@ export default function (pi: ExtensionAPI) {
           ctx,
         );
 
-        const text = JSON.stringify(result, null, 2);
-        const preview = truncateHead(text);
-        let output = preview.content;
-        if (preview.truncated) {
-          const directory = await mkdtemp(join(tmpdir(), "pi-durable-result-"));
-          const path = join(directory, "result.json");
-          await writeFile(path, text, { mode: 0o600 });
-          output += `\n[Truncated. Full JSON result: ${path}]`;
-        }
-
         const usage =
           agents && toolCallId && !signal?.aborted
             ? agents.takePendingUsage()
             : undefined;
         return {
-          content: [{ type: "text", text: output }],
+          content: [{ type: "text", text: text(result) }],
           details: result,
           ...(usage && { usage }),
         };
@@ -508,6 +520,7 @@ export default function (pi: ExtensionAPI) {
             .filter((name) => ["read", "bash", "edit", "write"].includes(name)),
         },
       ),
+    agentLine,
   );
 
   registerAction(
@@ -534,6 +547,7 @@ export default function (pi: ExtensionAPI) {
         args.task,
         args.delivery === "steer" ? "steer" : "followUp",
       ),
+    agentLine,
   );
 
   registerAction(
@@ -554,6 +568,7 @@ export default function (pi: ExtensionAPI) {
       },
     },
     async (open, args) => (await open()).result(args.id, args.submission),
+    replyText,
   );
 
   registerAction(
@@ -565,6 +580,7 @@ export default function (pi: ExtensionAPI) {
       properties: { id },
     },
     async (open, args) => (await open()).transcript(args.id),
+    (transcript) => transcript.output,
   );
 
   registerAction(
@@ -576,6 +592,7 @@ export default function (pi: ExtensionAPI) {
       properties: {},
     },
     async (open) => (runtime ? (await open()).list() : []),
+    (agents) => agents.map(agentLine).join("\n") || "No subagents.",
   );
 
   registerAction(
@@ -587,6 +604,7 @@ export default function (pi: ExtensionAPI) {
       properties: { id },
     },
     async (open, args) => (await open()).stop(args.id),
+    agentLine,
   );
 
   pi.registerCommand("agents", {

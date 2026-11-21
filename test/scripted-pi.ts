@@ -230,7 +230,7 @@ export async function openSubagentSession(
   ) {
     const result = await callTool(callId, action, args);
     assert.equal(result.isError, false, contentText(result.content));
-    return JSON.parse(contentText(result.content));
+    return result.details as Record<string, any>;
   }
 
   async function callTool(

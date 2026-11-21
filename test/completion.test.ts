@@ -144,7 +144,7 @@ for (const [name, deliveryScenario] of [
         await session.prompt(recoverPrompt);
         assert.ok(recovered, "The parent must receive the saved result");
         assert.equal(recovered.isError, false);
-        const result = JSON.parse(contentText(recovered.content));
+        const result = recovered.details as Record<string, any>;
         assert.equal(result.id, childId);
         assert.equal(result.submission, recoveryRequest.submission);
         assert.equal(result.status, "completed");
@@ -235,8 +235,8 @@ for (const [name, deliveryScenario] of [
         return [toolCall("spawn", "subagent_spawn", { task: childTask })];
       }
       if (results.length === 1) {
-        const { id } = JSON.parse(contentText(results[0].content));
-        assert.equal(typeof id, "string");
+        const [id] = /agent-\w+/.exec(contentText(results[0].content)) ?? [];
+        assert.ok(id, "The spawn result must name the child");
         childId = id;
         return steers.map((task, index) =>
           toolCall(`steer-${index}`, "subagent_send", {
