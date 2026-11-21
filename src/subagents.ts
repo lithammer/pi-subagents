@@ -223,15 +223,14 @@ export class Subagents {
   }
 
   async transcript(id: string) {
-    const child = this.children.get(id);
-    if (this.closed || !child) return undefined;
+    const child = this.child(id);
 
     const limit = 20;
     const failures: string[] = [];
     let cursor: Cursor | undefined;
     do {
       const page = await child.conversation.entries({}, 100, cursor, context);
-      if (this.closed) return undefined;
+      this.assertOpen();
       for (const entry of page.items) {
         const failure = describeFailure(entry);
         if (failure) failures.push(`#${entry.id} · ${failure}`);
@@ -539,7 +538,7 @@ export class Subagents {
   private child(id: string) {
     this.assertOpen();
     const child = this.children.get(id);
-    if (!child) throw new Error(`Unknown subagent: ${id}`);
+    if (!child) throw new Error(`No subagent ${id} in this session.`);
     return child;
   }
 

@@ -564,12 +564,7 @@ export default function (pi: ExtensionAPI) {
       promptSnippet: "Diagnose a stuck or failed background agent",
       properties: { id },
     },
-    async (open, args) => {
-      const transcript = await (await open()).transcript(args.id);
-      if (!transcript)
-        throw new Error("No subagent with that ID in this session.");
-      return transcript;
-    },
+    async (open, args) => (await open()).transcript(args.id),
   );
 
   registerAction(
@@ -599,32 +594,31 @@ export default function (pi: ExtensionAPI) {
       "List, stop, or inspect a background agent's failure transcript",
     handler: async (args, ctx) => {
       const agents = runtime ? await runtime : undefined;
-      const [action, id] = args.trim().split(/\s+/);
-      if (action === "transcript") {
-        if (!ctx.hasUI) return;
-        if (!id) {
-          ctx.ui.notify("Usage: /agents transcript <id>", "warning");
-          return;
-        }
-        const transcript = await agents?.transcript(id);
+      const rows = () => agents?.list() ?? [];
+      const showList = () =>
         ctx.ui.notify(
-          transcript?.output ?? "No subagent with that ID in this session.",
-          transcript ? "info" : "warning",
+          rows()
+            .map((agent) => `${agent.id} · ${agent.label} · ${agent.activity}`)
+            .join("\n") || "No subagents.",
+          "info",
         );
+
+      const [action, id] = args.trim().split(/\s+/);
+      if (!action) return showList();
+      if ((action !== "stop" && action !== "transcript") || !id)
+        return ctx.ui.notify(
+          "Usage: /agents, /agents stop <id>, or /agents transcript <id>",
+          "warning",
+        );
+      if (!agents || !rows().some((agent) => agent.id === id))
+        return ctx.ui.notify(`No subagent ${id} in this session.`, "warning");
+
+      if (action === "transcript") {
+        ctx.ui.notify((await agents.transcript(id)).output, "info");
         return;
       }
-      if (action === "stop" && id && agents) await agents.stop(id);
-
-      const rows = agents?.list() ?? [];
-      const content = rows.length
-        ? rows
-            .map(
-              (agent) =>
-                `${agent.id} · ${agent.label} · ${agent.status} · ${agent.activity}`,
-            )
-            .join("\n")
-        : "No subagents.";
-      if (ctx.hasUI) ctx.ui.notify(content, "info");
+      await agents.stop(id);
+      showList();
     },
   });
 }
