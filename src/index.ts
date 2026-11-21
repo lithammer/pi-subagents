@@ -15,11 +15,9 @@ import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TObject, type TProperties } from "typebox";
 import { Subagents, type AgentSnapshot, type Completion } from "./subagents.ts";
 
-// Saved sessions hold these names: a rename would leave old cards without
-// their renderer.
-const completionType = "durable-subagent-completion";
-const failureType = "durable-subagent-failure";
-const wakeType = "durable-subagent-wake";
+const completionType = "subagent-completion";
+const failureType = "subagent-failure";
+const wakeType = "subagent-wake";
 
 type Wake = {
   owner: Promise<Subagents>;
@@ -376,9 +374,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer(
     completionType,
     (message, { expanded, outputPad }, theme) => {
-      // Cards saved before durations were recorded lack one.
-      const completion = message.details as Omit<Completion, "durationMs"> &
-        Partial<Pick<Completion, "durationMs">>;
+      const completion = message.details as Completion;
       const [mark, color] = (
         {
           completed: ["✓", "success"],
@@ -388,10 +384,7 @@ export default function (pi: ExtensionAPI) {
       )[completion.status];
       const title = theme.fg(
         color,
-        `${mark} ${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status}` +
-          (completion.durationMs === undefined
-            ? ""
-            : ` · ${formatElapsed(completion.durationMs)}`),
+        `${mark} ${completion.id} · ${completion.label} · submission ${completion.submission} · ${completion.status} · ${formatElapsed(completion.durationMs)}`,
       );
       const usage = theme.fg(
         "muted",

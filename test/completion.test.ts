@@ -116,7 +116,7 @@ for (const [name, deliveryScenario] of [
           0,
           "The dropped notice must not wake the parent",
         );
-        const failures = customMessages(session, "durable-subagent-failure");
+        const failures = customMessages(session, "subagent-failure");
         assert.equal(
           failures.length,
           1,
@@ -436,7 +436,7 @@ async function waitForCompletion(
 }
 
 function completionNotices(session: AgentSession) {
-  return customMessages(session, "durable-subagent-completion");
+  return customMessages(session, "subagent-completion");
 }
 
 function customMessages(session: AgentSession, customType: string) {

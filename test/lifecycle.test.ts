@@ -171,7 +171,7 @@ for (const [action, name] of [
                     .some(
                       (entry) =>
                         entry.type === "custom_message" &&
-                        entry.customType === "durable-subagent-completion" &&
+                        entry.customType === "subagent-completion" &&
                         contentText(entry.content).includes(reply),
                     ),
                   "The child must still be able to reply to the outgoing branch",
@@ -243,8 +243,8 @@ function assertNoChildNotice(session: AgentSession) {
     .filter(
       (entry) =>
         entry.type === "custom_message" &&
-        (entry.customType === "durable-subagent-completion" ||
-          entry.customType === "durable-subagent-failure"),
+        (entry.customType === "subagent-completion" ||
+          entry.customType === "subagent-failure"),
     );
   assert.deepEqual(notices, [], "Lifecycle cleanup must not send old replies");
 }
