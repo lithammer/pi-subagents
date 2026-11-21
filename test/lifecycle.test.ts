@@ -92,8 +92,7 @@ for (const [action, name] of [
           uiContext: {
             ...initial.extensionRunner.getUIContext(),
             setWidget(key, content) {
-              if (key === "durable-subagents")
-                widgetVisible = content !== undefined;
+              if (key === "subagents") widgetVisible = content !== undefined;
             },
           },
         });

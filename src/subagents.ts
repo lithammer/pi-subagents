@@ -292,7 +292,7 @@ export class Subagents {
     const truncated = truncateHead(result.output);
     if (!truncated.truncated) return result;
 
-    const directory = await mkdtemp(join(tmpdir(), "pi-durable-subagent-"));
+    const directory = await mkdtemp(join(tmpdir(), "pi-subagents-"));
     const path = join(directory, `${id}.txt`);
     await writeFile(path, result.output, { mode: 0o600 });
     return {

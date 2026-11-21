@@ -15,6 +15,8 @@ import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TObject, type TProperties } from "typebox";
 import { Subagents, type AgentSnapshot, type Completion } from "./subagents.ts";
 
+// Saved sessions hold these names: a rename would leave old cards without
+// their renderer.
 const completionType = "durable-subagent-completion";
 const failureType = "durable-subagent-failure";
 const wakeType = "durable-subagent-wake";
@@ -229,17 +231,17 @@ export default function (pi: ExtensionAPI) {
 
     const running = agents.filter((agent) => agent.pending > 0);
     if (!running.length) {
-      session.ui.setWidget("durable-subagents", undefined);
+      session.ui.setWidget("subagents", undefined);
       return;
     }
     // Only the TUI takes a widget component.
     if (session.mode !== "tui") {
-      session.ui.setWidget("durable-subagents", running.map(agentRow));
+      session.ui.setWidget("subagents", running.map(agentRow));
       return;
     }
 
     const shown = running.slice(0, 8);
-    session.ui.setWidget("durable-subagents", (tui, theme) => {
+    session.ui.setWidget("subagents", (tui, theme) => {
       const clock = setInterval(() => tui.requestRender(), 1_000);
       clock.unref();
       return {
